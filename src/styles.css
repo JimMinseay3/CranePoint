@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+}
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 222.2 84% 4.9%;
+  --border: 214.3 31.8% 91.4%;
+  --primary: 221.2 83.2% 53.3%;
+  --primary-foreground: 210 40% 98%;
+  --background-rgb: 255, 255, 255;
+  
+  /* Google Colors */
+  --google-blue: 217 89% 61%;
+  --google-red: 5 81% 56%;
+  --google-yellow: 45 97% 51%;
+  --google-green: 141 55% 43%;
+
+  /* Nordic Forest Colors */
+  --nordic-green: 162 37% 37%;
+  --nordic-sage: 158 23% 71%;
+  --nordic-wood: 33 18% 45%;
+
+  /* Cyberpunk Colors */
+  --cyber-pink: 322 100% 67%;
+  --cyber-blue: 190 100% 50%;
+  --cyber-yellow: 55 100% 50%;
+
+  /* Ink Wash Colors */
+  --ink-black: 0 0% 15%;
+  --paper-white: 40 25% 94%;
+  --ink-gray: 0 0% 45%;
+}
+
+.dark {
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --primary: 217.2 91.2% 59.8%;
+  --primary-foreground: 222.2 47.4% 11.2%;
+  --background-rgb: 15, 23, 42;
+}
+
+/* Google Theme */
+.theme-google {
+  --primary: var(--google-blue);
+}
+
+/* Nordic Theme */
+.theme-nordic {
+  --primary: var(--nordic-green);
+}
+
+/* Cyberpunk Theme */
+.theme-cyber {
+  --primary: var(--cyber-pink);
+}
+
+.theme-cyber.dark {
+  --primary: var(--cyber-blue);
+}
+
+/* Ink Wash Theme */
+.theme-ink {
+  --primary: var(--ink-black);
+  --background: var(--paper-white);
+  --foreground: var(--ink-black);
+  --border: 0 0% 80%;
+}
+
+.theme-ink.dark {
+  --primary: 0 0% 90%;
+  --background: 0 0% 10%;
+  --foreground: 0 0% 85%;
+  --border: 0 0% 25%;
+}
+
+body {
+  @apply bg-background text-foreground transition-colors duration-300;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+}
+
+/* 亚克力风格 */
+.acrylic {
+  @apply backdrop-blur-xl border-border;
+  background-color: rgba(var(--background-rgb), 0.6);
+}
+
+/* 极简线条 */
+.border-thin {
+  border-width: 0.5px;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+}
