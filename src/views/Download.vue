@@ -35,8 +35,25 @@ const financeConfig = ref({
 
 // 下载设置
 const downloadSettings = ref({
-  financePath: 'D:\\CranePoint_Data\\Finance'
+  financePath: ''
 })
+
+const setFinancePath = async () => {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: downloadSettings.value.financePath || undefined
+    })
+    if (selected) {
+      downloadSettings.value.financePath = selected as string
+      localStorage.setItem('financePath', selected as string)
+    }
+  } catch (err) {
+    console.error('Failed to open directory dialog:', err)
+  }
+}
 
 interface DownloadedItem {
   name: String;
@@ -181,6 +198,15 @@ let unlistenProgress: any
 let unlistenStatus: any
 
 onMounted(async () => {
+  // 初始化路径：优先从 localStorage 获取，如果没有则使用 dataPath + \Finance
+  const savedPath = localStorage.getItem('financePath')
+  if (savedPath) {
+    downloadSettings.value.financePath = savedPath
+  } else {
+    const baseDataPath = localStorage.getItem('dataPath') || 'D:\\CranePoint_Data'
+    downloadSettings.value.financePath = `${baseDataPath}\\Finance`
+  }
+
   scanDownloaded()
   
   unlistenProgress = await listen('download-progress', (event: any) => {
@@ -478,7 +504,10 @@ onUnmounted(() => {
                 type="text" 
                 class="flex-1 bg-foreground/5 border border-thin rounded-xl px-4 py-3 text-sm text-foreground/70 outline-none focus:ring-2 focus:ring-primary/20 transition-all" 
               />
-              <button class="px-6 py-2 bg-background border border-thin rounded-xl text-sm font-medium hover:bg-foreground/5 transition-all">
+              <button 
+                @click="setFinancePath"
+                class="px-6 py-2 bg-background border border-thin rounded-xl text-sm font-medium hover:bg-foreground/5 transition-all"
+              >
                 浏览...
               </button>
             </div>

@@ -9,27 +9,36 @@ import {
   PinOff 
 } from 'lucide-vue-next'
 
-const appWindow = getCurrentWindow()
+const appWindow = ref<any>(null)
 const isPinned = ref(false)
 const isMaximized = ref(false)
 
 const togglePin = async () => {
+  if (!appWindow.value) return
   isPinned.value = !isPinned.value
-  await appWindow.setAlwaysOnTop(isPinned.value)
+  await appWindow.value.setAlwaysOnTop(isPinned.value)
 }
 
-const minimize = () => appWindow.minimize()
+const minimize = () => appWindow.value?.minimize()
 const toggleMaximize = async () => {
-  await appWindow.toggleMaximize()
-  isMaximized.value = await appWindow.isMaximized()
+  if (!appWindow.value) return
+  await appWindow.value.toggleMaximize()
+  isMaximized.value = await appWindow.value.isMaximized()
 }
-const close = () => appWindow.close()
+const close = () => appWindow.value?.close()
 
 onMounted(async () => {
-  // 监听窗口最大化状态变化
-  appWindow.onResized(async () => {
-    isMaximized.value = await appWindow.isMaximized()
-  })
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    appWindow.value = getCurrentWindow()
+    
+    // 监听窗口最大化状态变化
+    appWindow.value.onResized(async () => {
+      isMaximized.value = await appWindow.value.isMaximized()
+    })
+  } catch (e) {
+    console.warn('Running in non-Tauri environment, window controls disabled.')
+  }
 })
 </script>
 

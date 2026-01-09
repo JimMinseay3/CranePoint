@@ -1,128 +1,170 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tauri::{AppHandle, Emitter};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use tokio::sync::Semaphore;
+use futures::future::join_all;
+use std::collections::HashSet;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            get_stock_data,
+            download_finance_data,
+            list_downloaded_finance,
+            open_folder
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-async fn fetch_page_data(
-    page: i32,
-    size: i32,
-    python_path: &str,
-    app_handle: AppHandle,
-    progress_map: Arc<Mutex<HashMap<i32, i32>>>,
-    total_shards: i32,
-) -> Result<Vec<Value>, String> {
-    let mut child = Command::new(python_path)
-        .arg("lib/data_fetching.py")
-        .arg("--page")
-        .arg(page.to_string())
-        .arg("--size")
-        .arg(size.to_string())
-        .env("PYTHONIOENCODING", "utf-8")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("无法启动分片 {}: {}", page, e))?;
-
-    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
-    let mut reader = BufReader::new(stdout).lines();
-    let mut last_json = String::new();
-
-    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        
-        if trimmed.starts_with("PROGRESS:") {
-            if let Ok(p) = trimmed.trim_start_matches("PROGRESS:").trim().parse::<i32>() {
-                let mut map = progress_map.lock().unwrap();
-                map.insert(page, p);
-                
-                let total_p: i32 = map.values().sum();
-                let avg_progress = total_p / total_shards;
-                app_handle.emit("refresh-progress", avg_progress).unwrap();
-            }
-        } else if trimmed.starts_with('[') {
-            // 只有以 [ 开头的行才被认为是 JSON 数据行
-            last_json = trimmed.to_string();
-        }
-    }
-
-    let _ = child.wait().await;
+/// 直接从东方财富 API 获取单页股票数据
+async fn fetch_stock_page(page: i32, page_size: i32) -> Result<Vec<Value>, String> {
+    let client = reqwest::Client::new();
+    let url = "http://push2.eastmoney.com/api/qt/clist/get";
     
-    let data: Value = serde_json::from_str(&last_json)
-        .map_err(|e| format!("解析分片 {} 失败: {}", page, e))?;
+    // 东方财富 API 参数
+    let params = [
+        ("pn", page.to_string()),
+        ("pz", page_size.to_string()),
+        ("po", "1".to_string()),
+        ("np", "1".to_string()),
+        ("ut", "bd1d9ddb04089700cf9c27f6f7426281".to_string()),
+        ("fltt", "2".to_string()),
+        ("invt", "2".to_string()),
+        ("fid", "f3".to_string()),
+        ("fs", "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048".to_string()), // 沪深 A 股
+        ("fields", "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f22,f23,f37,f57,f58,f114,f115,f161,f162".to_string()),
+    ];
 
-    if let Some(arr) = data.as_array() {
-        Ok(arr.clone())
-    } else {
-        Ok(vec![])
+    let response = client.get(url)
+        .query(&params)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    let json_data: Value = response.json()
+        .await
+        .map_err(|e| format!("解析 JSON 失败: {}", e))?;
+
+    // 提取并转换数据格式以适配前端
+    let mut result = Vec::new();
+    if let Some(diff) = json_data.get("data").and_then(|d| d.get("diff")).and_then(|diff| diff.as_array()) {
+        for item in diff {
+            // 字段映射逻辑
+            let f12 = item.get("f12").and_then(|v| v.as_str()).unwrap_or("-");
+            if f12 == "-" { continue; }
+
+            let f2 = item.get("f2").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if f2 == 0.0 || f2.is_nan() { continue; } // 过滤停牌或无价数据
+
+            let prev_close = item.get("f18").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            
+            // 彻底移除对 f51/f52 的依赖，完全根据 A 股规则动态计算
+            let limit_ratio = if f12.starts_with("688") || f12.starts_with("30") {
+                0.20 // 科创板、创业板 20%
+            } else if item.get("f14").and_then(|v| v.as_str()).unwrap_or("").contains("ST") {
+                0.05 // ST 股 5%
+            } else {
+                0.10 // 主板 10%
+            };
+
+            let limit_up = if prev_close > 0.0 { (prev_close * (1.0 + limit_ratio) * 100.0).round() / 100.0 } else { 0.0 };
+            let limit_down = if prev_close > 0.0 { (prev_close * (1.0 - limit_ratio) * 100.0).round() / 100.0 } else { 0.0 };
+
+            result.push(json!({
+                "code": f12,
+                "name": item.get("f14").and_then(|v| v.as_str()).unwrap_or("-"),
+                "price": f2,
+                "change": item.get("f3").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "change_amount": item.get("f4").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "volume": item.get("f5").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "amount": item.get("f6").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "amplitude": item.get("f7").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "turnover": item.get("f8").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "pe_dynamic": item.get("f9").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "volume_ratio": item.get("f10").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "high": item.get("f15").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "low": item.get("f16").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "open": item.get("f17").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "prevClose": prev_close,
+                "market_cap": item.get("f20").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "circulating_market_cap": item.get("f21").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "speed": item.get("f22").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "pb": item.get("f23").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "turnover_actual": item.get("f37").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "limit_up": limit_up,
+                "limit_down": limit_down,
+                "total_shares": item.get("f57").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "circulating_shares": item.get("f58").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "pe_ttm": item.get("f114").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "pe_static": item.get("f115").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "outer_disc": item.get("f161").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "inner_disc": item.get("f162").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            }));
+        }
     }
+    Ok(result)
 }
 
 #[tauri::command]
 async fn get_stock_data(app: AppHandle) -> Result<Value, String> {
-    let python_path = if cfg!(windows) {
-        "../.venv/Scripts/python.exe"
-    } else {
-        "../.venv/bin/python"
-    };
-
-    let shard_size = 100; // 东方财富 API 限制每页最多 100 条
-    let total_shards = 65; // 65 个分片 * 100 = 6500 只，足以覆盖全量 A 股
-    let progress_map = Arc::new(Mutex::new(HashMap::new()));
-    let semaphore = Arc::new(Semaphore::new(10)); // 限制并发数为 10，避免被封禁
+    let page_size = 100; // 接口实际限制每页 100 条
+    let total_pages = 70;  // 70 页覆盖约 7000 只股票
     
-    for i in 1..=total_shards {
-        progress_map.lock().unwrap().insert(i, 0);
-    }
+    app.emit("refresh-progress", 10).unwrap();
 
     let mut tasks = vec![];
-    for i in 1..=total_shards {
-        let app_clone = app.clone();
-        let p_path = python_path.to_string();
-        let p_map = Arc::clone(&progress_map);
-        let sem = Arc::clone(&semaphore);
-        
-        tasks.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap(); // 获取信号量许可
-            let res = fetch_page_data(i, shard_size, &p_path, app_clone, p_map, total_shards).await;
-            if let Err(ref e) = res {
-                eprintln!("分片 {} 获取失败: {}", i, e);
-            }
-            res
-        }));
+    for page in 1..=total_pages {
+        tasks.push(fetch_stock_page(page, page_size));
     }
 
-    let mut all_data = vec![];
+    let results = join_all(tasks).await;
+    
+    let mut all_data = Vec::new();
+    let mut seen_codes = HashSet::new();
     let mut success_count = 0;
-    for task in tasks {
-        match task.await {
-            Ok(Ok(result)) => {
-                all_data.extend(result);
+
+    for (i, res) in results.into_iter().enumerate() {
+        match res {
+            Ok(data) => {
+                for item in data {
+                    let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                    if !code.is_empty() && !seen_codes.contains(code) {
+                        seen_codes.insert(code.to_string());
+                        all_data.push(item);
+                    }
+                }
                 success_count += 1;
-            }
-            Ok(Err(e)) => {
-                eprintln!("获取分片数据出错: {}", e);
+                let progress = 10 + (success_count * 90 / total_pages);
+                app.emit("refresh-progress", progress).unwrap();
             }
             Err(e) => {
-                eprintln!("任务执行出错: {}", e);
+                eprintln!("第 {} 页抓取失败: {}", i + 1, e);
             }
         }
     }
 
-    println!("成功获取 {}/{} 个分片的数据，总计 {} 条记录", success_count, total_shards, all_data.len());
+    // 默认按涨跌幅降序排序，确保数据有序
+    all_data.sort_by(|a, b| {
+        let a_val = a.get("change").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let b_val = b.get("change").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
+    println!("成功抓取并去重，共计 {} 条记录", all_data.len());
+    
     app.emit("refresh-progress", 100).unwrap();
     Ok(Value::Array(all_data))
 }
@@ -159,7 +201,7 @@ async fn download_finance_data(
         .spawn()
         .map_err(|e| format!("无法启动财报下载脚本: {}", e))?;
 
-    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
+    let _stdout = child.stdout.take().ok_or("无法打开 stdout")?;
     let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
     let mut stderr_reader = BufReader::new(stderr).lines();
 
@@ -194,131 +236,44 @@ async fn download_finance_data(
 }
 
 #[tauri::command]
-async fn run_stock_analysis(
-    app: AppHandle,
-    symbol: String,
-    path: String,
-) -> Result<String, String> {
-    let mut python_path = if cfg!(windows) {
-        "../.venv/Scripts/python.exe".to_string()
-    } else {
-        "../.venv/bin/python".to_string()
-    };
-
-    // 检查路径是否存在，如果不存在尝试 alternate 路径
-    if !std::path::Path::new(&python_path).exists() {
-        println!("WARN: 默认 Python 路径不存在: {}, 尝试备选路径...", python_path);
-        if cfg!(windows) {
-            let alt_path = "../venv/Scripts/python.exe";
-            if std::path::Path::new(alt_path).exists() {
-                python_path = alt_path.to_string();
-            } else {
-                // 如果虚拟环境找不到，尝试系统 python
-                python_path = "python".to_string();
-            }
-        }
-    }
-
-    println!("DEBUG: [Analysis] 最终使用 Python 路径: {}, 股票: {}", python_path, symbol);
-
-    let mut child = Command::new(&python_path)
-        .arg("../lib/data_analysis.py")
-        .arg("--symbol")
-        .arg(symbol)
-        .arg("--path")
-        .arg(path)
-        .env("PYTHONIOENCODING", "utf-8")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("无法启动分析脚本: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
-    let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
-    let mut stderr_reader = BufReader::new(stderr).lines();
-
-    let app_handle = app.clone();
-    let (tx, mut rx) = tauri::async_runtime::channel::<String>(1);
-
-    // 处理 stderr 用于实时状态更新
-    let stderr_task = tauri::async_runtime::spawn(async move {
-        let mut last_success = String::from("");
-        let mut error_traceback = String::from("");
-        
-        while let Ok(Some(line)) = stderr_reader.next_line().await {
-            if line.starts_with("INFO:") {
-                app_handle.emit("analysis-status", line.clone()).unwrap();
-            } else if line.starts_with("SUCCESS:") {
-                last_success = line.trim_start_matches("SUCCESS:").trim().to_string();
-            } else if line.starts_with("ERROR:") {
-                error_traceback = line.trim_start_matches("ERROR:").trim().to_string();
-                app_handle.emit("analysis-status", line.clone()).unwrap();
-            } else {
-                // 捕获没有前缀的其他错误信息（如 Python 原始 traceback）
-                if !line.trim().is_empty() && last_success.is_empty() {
-                    error_traceback.push_str(&line);
-                    error_traceback.push('\n');
-                }
-            }
-        }
-        (last_success, error_traceback)
-    });
-
-    let (final_result, error_traceback) = stderr_task.await.unwrap_or((String::new(), String::new()));
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    
-    if status.success() && !final_result.is_empty() {
-        Ok(final_result)
-    } else {
-        let err_msg = if !error_traceback.is_empty() {
-            error_traceback
-        } else {
-            format!("脚本退出码: {:?}", status.code())
-        };
-        Err(format!("分析失败: {}", err_msg))
-    }
-}
-
-#[derive(serde::Serialize)]
-struct DownloadedItem {
-    name: String,
-    updated_at: u64,
-}
-
-#[tauri::command]
-fn list_downloaded_finance(path: String) -> Result<Vec<DownloadedItem>, String> {
-    let mut entries = Vec::new();
+fn list_downloaded_finance(path: String) -> Result<Vec<Value>, String> {
+    let mut results = Vec::new();
     let dir = std::path::Path::new(&path);
     
     if !dir.exists() {
-        return Ok(entries);
+        return Ok(results);
     }
 
-    if let Ok(read_dir) = std::fs::read_dir(dir) {
-        for entry in read_dir {
-            if let Ok(entry) = entry {
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    let metadata = entry.metadata().map_err(|e| e.to_string())?;
-                    let modified = metadata.modified().map_err(|e| e.to_string())?
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|e| e.to_string())?
-                        .as_secs();
-
-                    if let Some(name) = entry.file_name().to_str() {
-                        entries.push(DownloadedItem {
-                            name: name.to_string(),
-                            updated_at: modified,
-                        });
-                    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_dir() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let metadata = entry.metadata().ok();
+                    let updated_at = metadata
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    
+                    results.push(json!({
+                        "name": name,
+                        "updated_at": updated_at
+                    }));
                 }
             }
         }
     }
     
-    // 按修改时间倒序排列，最新的在前
-    entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(entries)
-}
+    // 按时间降序排序
+    results.sort_by(|a, b| {
+         let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+         let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+         b_time.cmp(&a_time).reverse()
+     });
+ 
+     Ok(results)
+ }
 
 #[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
@@ -329,43 +284,24 @@ fn open_folder(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer")
-            .arg(path)
+        std::process::Command::new("explorer")
+            .arg(&path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
-            .arg(path)
+        std::process::Command::new("open")
+            .arg(&path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open")
-            .arg(path)
+        std::process::Command::new("xdg-open")
+            .arg(&path)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-
     Ok(())
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            greet, 
-            get_stock_data,
-            download_finance_data,
-            list_downloaded_finance,
-            open_folder,
-            run_stock_analysis
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

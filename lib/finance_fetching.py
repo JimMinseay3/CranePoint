@@ -106,6 +106,8 @@ def get_cninfo_reports(symbol, years, report_types, save_path):
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
+        "Referer": "http://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=hisAnnouncement/hisAnnouncement",
+        "Origin": "http://www.cninfo.com.cn"
     }
 
     url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
@@ -121,7 +123,7 @@ def get_cninfo_reports(symbol, years, report_types, save_path):
 
         for r_type in report_types:
             search_keys = search_keys_map.get(r_type, [r_type])
-            found_and_downloaded = False
+            found_for_this_type = False
 
             # 构建查询数据公共参数
             search_year = int(year)
@@ -129,7 +131,8 @@ def get_cninfo_reports(symbol, years, report_types, save_path):
             start_date = f"{search_year}-01-01"
             end_date = f"{search_year + 1}-06-30"
             
-            # 自动判断市场
+            # 自动判断市场 (CNINFO 搜索参数)
+            # 实际上使用 szsh 通常最稳健，或者根据股票代码精确区分
             if stock_code.startswith(('60', '68', '90')):
                 column = "shmb"; plate = "sh"
             elif stock_code.startswith(('00', '20')):
@@ -139,10 +142,10 @@ def get_cninfo_reports(symbol, years, report_types, save_path):
             elif stock_code.startswith(('43', '83', '87', '88')):
                 column = "bj"; plate = "bj"
             else:
-                column = "szsh"; plate = "szsh"
+                column = ""; plate = "" # 留空通常可以搜索全市场
 
             for search_key in search_keys:
-                if found_and_downloaded: break
+                if found_for_this_type: break
 
                 data = {
                     "pageNum": "1",
@@ -153,7 +156,7 @@ def get_cninfo_reports(symbol, years, report_types, save_path):
                     "stock": f"{stock_code},{org_id}",
                     "searchkey": search_key,
                     "secid": "",
-                    "category": "", # 移除 category 限制，提高搜索覆盖率
+                    "category": "category_ndbg_szsh;" if r_type == "年报" else "category_bndbg_szsh;" if r_type == "半年报" else "category_yjdbg_szsh;" if r_type == "一季报" else "category_sjdbg_szsh;",
                     "trade": "",
                     "seDate": f"{start_date}~{end_date}"
                 }
@@ -166,43 +169,36 @@ def get_cninfo_reports(symbol, years, report_types, save_path):
                     res_json = response.json()
                     announcements = res_json.get('announcements', [])
                     
-                    valid_reports = []
                     if announcements:
                         for a in announcements:
                             title = a['announcementTitle']
-                            # 必须包含年份关键词
-                            if str(year) in title:
-                                # 检查标题是否包含类型核心词
-                                if any(k in title for k in [search_key, r_type, "年度报告" if r_type=="年报" else ""]):
-                                    # 排除摘要、英文版、风险提示等
-                                    if not any(k in title for k in ["摘要", "英文", "风险提示", "提示性", "更正"]):
-                                        valid_reports.append(a)
-                        
-                        if valid_reports:
-                            # 优先选择标题最短的（通常是正文）
-                            report = min(valid_reports, key=lambda x: len(x['announcementTitle']))
-                            pdf_url = "http://static.cninfo.com.cn/" + report['adjunctUrl']
-                            title = report['announcementTitle']
-                            title = re.sub(r'[\\/:*?"<>|]', '_', title)
-                            file_path = os.path.join(year_dir, f"{title}.pdf")
-                            
-                            print(f"Downloading: {title}", file=sys.stderr)
-                            pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
-                            if pdf_res.status_code == 200:
-                                with open(file_path, 'wb') as f:
-                                    f.write(pdf_res.content)
-                                print(f"SUCCESS: 已保存 {file_path}", file=sys.stderr)
-                                found_and_downloaded = True
-                            else:
-                                print(f"ERROR: 下载 PDF 失败 (HTTP {pdf_res.status_code})", file=sys.stderr)
+                            # 必须包含年份关键词且排除“摘要”、“英文版”、“提示性”等
+                            if str(year) in title and not any(k in title for k in ["摘要", "英文", "风险提示", "提示性", "更正"]):
+                                pdf_url = "http://static.cninfo.com.cn/" + a['adjunctUrl']
+                                adj_title = re.sub(r'[\\/:*?"<>|]', '_', title)
+                                file_path = os.path.join(year_dir, f"{adj_title}.pdf")
+                                
+                                if os.path.exists(file_path):
+                                    print(f"INFO: 跳过已存在: {adj_title}", file=sys.stderr)
+                                    found_for_this_type = True
+                                    break
+                                    
+                                print(f"Downloading: {adj_title}", file=sys.stderr)
+                                pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
+                                if pdf_res.status_code == 200:
+                                    with open(file_path, 'wb') as f:
+                                        f.write(pdf_res.content)
+                                    print(f"SUCCESS: 已保存 {file_path}", file=sys.stderr)
+                                    found_for_this_type = True
+                                    break
                     
                     time.sleep(1) # 增加延迟，避免被封
 
                 except Exception as e:
                     print(f"WARNING: 搜索 {year} {r_type} 时出错: {str(e)}", file=sys.stderr)
 
-            if not found_and_downloaded:
-                print(f"WARNING: 未能找到 {year} 年的 {r_type}。请确认该标的在该年份是否已上市。", file=sys.stderr)
+            if not found_for_this_type:
+                print(f"WARNING: 未能找到 {year} 年的 {r_type}。", file=sys.stderr)
 
             completed_tasks += 1
             progress = 20 + int((completed_tasks / total_tasks) * 80)

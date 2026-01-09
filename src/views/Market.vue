@@ -48,13 +48,31 @@
               <RotateCw class="w-4 h-4" :class="{ 'animate-spin': isRefreshing }" />
               <span>刷新</span>
             </button>
-            <button 
-              @click="exportData"
-              class="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 bg-foreground/5 hover:bg-foreground/10 border border-thin rounded-lg transition-all active:scale-95 shadow-sm text-sm font-medium whitespace-nowrap"
-            >
-              <Save class="w-4 h-4" />
-              <span>另存为</span>
-            </button>
+            <div class="relative">
+              <button 
+                @click="showExportMenu = !showExportMenu"
+                class="flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 bg-foreground/5 hover:bg-foreground/10 border border-thin rounded-lg transition-all active:scale-95 shadow-sm text-sm font-medium whitespace-nowrap"
+              >
+                <Save class="w-4 h-4" />
+                <span>另存为</span>
+              </button>
+              
+              <!-- 导出菜单 -->
+              <div v-if="showExportMenu" class="absolute right-0 mt-2 w-48 bg-background border border-thin rounded-xl shadow-xl z-50 py-1 animate-in fade-in zoom-in-95 duration-200">
+                <button @click="exportData('xlsx')" class="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-foreground/5 transition-colors">
+                  <FileSpreadsheet class="w-4 h-4 text-emerald-500" />
+                  <span>Excel (.xlsx)</span>
+                </button>
+                <button @click="exportData('csv')" class="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-foreground/5 transition-colors">
+                  <FileTextIcon class="w-4 h-4 text-blue-500" />
+                  <span>CSV (.csv)</span>
+                </button>
+                <button @click="exportData('pdf')" class="w-full flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-foreground/5 transition-colors">
+                  <FileJson class="w-4 h-4 text-red-500" />
+                  <span>PDF (.pdf)</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -79,14 +97,6 @@
             </div>
           </div>
           <div class="flex items-end gap-3 lg:col-span-2">
-            <label class="flex items-center gap-2 px-3 py-1.5 bg-background border border-thin rounded-md cursor-pointer hover:bg-foreground/[0.02] transition-colors group">
-              <input 
-                type="checkbox" 
-                v-model="filters.onlyIndividualStocks"
-                class="w-4 h-4 rounded border-thin text-primary focus:ring-primary"
-              />
-              <span class="text-sm font-medium text-foreground/70 group-hover:text-foreground">仅看个股 (排除北交所/转债/退市)</span>
-            </label>
             <button @click="resetFilters" class="px-4 py-1.5 text-sm font-medium text-foreground/60 hover:text-foreground hover:bg-foreground/5 rounded-md transition-colors">
               重置全部
             </button>
@@ -127,76 +137,96 @@
 
     <!-- 数据展示区域 - 确保 flex-1 填满垂直剩余空间 -->
     <div class="flex-1 border border-thin rounded-xl overflow-hidden flex flex-col bg-card shadow-sm relative">
-      <div class="overflow-auto flex-1 custom-scrollbar">
-        <table class="w-full min-w-[2000px] border-collapse text-left text-sm table-fixed">
-          <thead class="sticky top-0 bg-background/95 backdrop-blur-md z-30 border-b border-thin">
-            <tr>
-              <th 
-                v-for="header in headers" 
-                :key="header.key" 
-                @click="toggleSort(header.key)"
-                class="px-4 py-3.5 font-semibold text-foreground/60 border-r border-thin last:border-r-0 whitespace-nowrap bg-background cursor-pointer hover:bg-foreground/[0.05] transition-colors group/th"
-                :class="{ 
-                  'sticky left-0 z-50': header.key === 'code',
-                  'sticky left-[100px] z-50': header.key === 'name',
-                  'sticky left-[220px] z-50': header.key === 'price',
-                  'sticky left-[320px] z-50': header.key === 'change',
-                  'shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]': header.key === 'change'
-                }"
-                :style="{ width: header.width }"
-              >
-                <div class="flex items-center justify-between gap-2">
-                  <span>{{ header.label }}</span>
-                  <div class="flex flex-col opacity-0 group-hover/th:opacity-100 transition-opacity" :class="{ 'opacity-100': sortConfig.key === header.key }">
-                    <ChevronUp class="w-3 h-3 -mb-1" :class="{ 'text-primary': sortConfig.key === header.key && sortConfig.order === 'asc' }" />
-                    <ChevronDown class="w-3 h-3" :class="{ 'text-primary': sortConfig.key === header.key && sortConfig.order === 'desc' }" />
+      <div 
+        ref="scrollContainer"
+        @scroll="onScroll"
+        class="overflow-auto flex-1 custom-scrollbar"
+      >
+        <div :style="{ height: `${totalHeight}px`, position: 'relative' }">
+          <table class="w-full min-w-max border-collapse text-left text-sm table-auto bg-background">
+            <thead class="sticky top-0 bg-background/95 backdrop-blur-md z-40 border-b border-thin">
+              <tr>
+                <th 
+                  v-for="header in headers" 
+                  :key="header.key" 
+                  @click="toggleSort(header.key)"
+                  class="px-4 py-3.5 font-semibold border-r border-thin last:border-r-0 whitespace-nowrap bg-background cursor-pointer hover:bg-foreground/[0.05] transition-colors group/th"
+                   :class="[
+                     { 
+                       'sticky left-0 z-50 shadow-[1px_0_0_0_rgba(var(--color-thin))]': header.key === 'code',
+                       'sticky left-[100px] z-50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]': header.key === 'name',
+                     },
+                     getGroupHeaderClass(header.group)
+                   ]"
+                  :style="{ minWidth: header.width }"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <span>{{ header.label }}</span>
+                    <div class="flex flex-col opacity-0 group-hover/th:opacity-100 transition-opacity" :class="{ 'opacity-100': sortConfig.key === header.key }">
+                      <ChevronUp class="w-3 h-3 -mb-1" :class="{ 'text-primary': sortConfig.key === header.key && sortConfig.order === 'asc' }" />
+                      <ChevronDown class="w-3 h-3" :class="{ 'text-primary': sortConfig.key === header.key && sortConfig.order === 'desc' }" />
+                    </div>
                   </div>
-                </div>
-              </th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-thin">
-            <tr 
-              v-for="(row, index) in filteredStocks" 
-              :key="row.code" 
-              class="hover:bg-foreground/[0.03] transition-colors group"
-              :class="{ 'bg-foreground/[0.01]': index % 2 === 0 }"
-            >
-              <!-- 代码列 - 固定 (强制实色背景) -->
-              <td class="px-4 py-3 border-r border-thin font-mono text-primary/80 sticky left-0 z-10 bg-background group-hover:bg-muted/50">{{ row.code }}</td>
+                </th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-thin">
+              <!-- 顶部占位行 -->
+              <tr :style="{ height: `${offsetY}px` }">
+                <td :colspan="headers.length" class="p-0 border-0"></td>
+              </tr>
               
-              <!-- 名称列 - 固定 (强制实色背景) -->
-              <td class="px-4 py-3 border-r border-thin font-medium sticky left-[100px] z-10 bg-background group-hover:bg-muted/50">{{ row.name }}</td>
-              
-              <!-- 最新价列 - 固定 (强制实色背景) -->
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums sticky left-[220px] z-10 bg-background group-hover:bg-muted/50" :class="getPriceColor(row.change)">{{ row.price.toFixed(2) }}</td>
-              
-              <!-- 涨跌幅列 - 固定 (强制实色背景) -->
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums sticky left-[320px] z-10 bg-background group-hover:bg-muted/50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]" :class="getPriceColor(row.change)">{{ (row.change > 0 ? '+' : '') + row.change.toFixed(2) }}%</td>
-              
-              <!-- 动态指标列 -->
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.speed)">{{ (row.speed > 0 ? '+' : '') + row.speed.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.volume_ratio.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.turnover.toFixed(2) }}%</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.pe_dynamic === 0 ? '--' : row.pe_dynamic.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.pe_static === 0 ? '--' : row.pe_static.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.pb.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.market_cap) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.circulating_market_cap) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.main_inflow)">{{ formatNumber(row.main_inflow) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.main_inflow_ratio)">{{ row.main_inflow_ratio.toFixed(2) }}%</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.change_60d)">{{ (row.change_60d > 0 ? '+' : '') + row.change_60d.toFixed(2) }}%</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.change_ytd)">{{ (row.change_ytd > 0 ? '+' : '') + row.change_ytd.toFixed(2) }}%</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.amplitude.toFixed(2) }}%</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.volume) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.amount) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.price - row.open)">{{ row.high.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.price - row.open)">{{ row.low.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.open.toFixed(2) }}</td>
-              <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70 border-r-0">{{ row.prevClose.toFixed(2) }}</td>
-            </tr>
-          </tbody>
-        </table>
+              <!-- 实际数据行 -->
+              <tr 
+                v-for="(row, index) in visibleStocks" 
+                :key="row.code" 
+                class="hover:bg-foreground/[0.03] transition-colors group"
+                :class="{ 'bg-foreground/[0.01]': (startIndex + index) % 2 === 0 }"
+                :style="{ height: `${rowHeight}px` }"
+              >
+                <!-- 固定列：代码、名称 -->
+                <td class="px-4 py-3 border-r border-thin text-blue-500 font-mono sticky left-0 z-10 bg-background group-hover:bg-foreground/[0.03] transition-colors shadow-[1px_0_0_0_rgba(var(--color-thin))]">{{ row.code }}</td>
+                <td class="px-4 py-3 border-r border-thin font-medium sticky left-[100px] z-10 bg-background group-hover:bg-foreground/[0.03] transition-colors shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">{{ row.name }}</td>
+
+                <!-- 动态指标列 -->
+                <!-- 动能组 -->
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.price - row.prevClose)">{{ row.price.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.change)">{{ (row.change > 0 ? '+' : '') + row.change.toFixed(2) }}%</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.speed)">{{ (row.speed > 0 ? '+' : '') + row.speed.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.volume_ratio.toFixed(2) }}</td>
+
+                <!-- 量能组 -->
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.volume) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.amount) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.turnover_actual.toFixed(2) }}%</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.turnover.toFixed(2) }}%</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-[#EA4335] font-bold">{{ row.limit_up > 0 ? row.limit_up.toFixed(2) : '--' }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-emerald-500 font-bold">{{ row.limit_down > 0 ? row.limit_down.toFixed(2) : '--' }}</td>
+
+                <!-- 空间组 -->
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.amplitude.toFixed(2) }}%</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.high - row.prevClose)">{{ row.high.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.low - row.prevClose)">{{ row.low.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.open.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.prevClose.toFixed(2) }}</td>
+
+                <!-- 基本面组 -->
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.market_cap) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.circulating_market_cap) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.total_shares) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.circulating_shares) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.pe_static === 0 ? '--' : row.pe_static.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.pe_ttm === 0 ? '--' : row.pe_ttm.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70 border-r-0">{{ row.pb.toFixed(2) }}</td>
+              </tr>
+
+              <!-- 底部占位行 -->
+              <tr :style="{ height: `${Math.max(0, totalHeight - offsetY - (visibleStocks.length * rowHeight))}px` }">
+                <td :colspan="headers.length" class="p-0 border-0"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
         <!-- 无数据提示 -->
         <div v-if="filteredStocks.length === 0 && !isRefreshing" class="flex flex-col items-center justify-center py-20 text-foreground/30">
@@ -209,10 +239,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Search, RotateCw, Save, AlertCircle, X, ChevronUp, ChevronDown, ListFilter, LineChart, Clock } from 'lucide-vue-next'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { Search, RotateCw, Save, AlertCircle, X, ChevronUp, ChevronDown, ListFilter, LineChart, Clock, FileSpreadsheet, FileText as FileTextIcon, FileJson } from 'lucide-vue-next'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { save } from '@tauri-apps/plugin-dialog'
+import { writeFile } from '@tauri-apps/plugin-fs'
 import { marketStore } from '../store/market'
 
 const searchQuery = ref('')
@@ -220,44 +252,136 @@ const isRefreshing = ref(false)
 const progress = ref(0)
 const errorMessage = ref('')
 const showFilters = ref(false)
+const showExportMenu = ref(false)
 
 const stocks = ref<any[]>([])
+
+// --- 虚拟滚动逻辑开始 ---
+const scrollContainer = ref<HTMLElement | null>(null)
+const scrollTop = ref(0)
+const containerHeight = ref(800)
+const rowHeight = 45
+const bufferCount = 10
+
+const onScroll = (e: Event) => {
+  scrollTop.value = (e.target as HTMLElement).scrollTop
+}
+
+const totalHeight = computed(() => {
+  return filteredStocks.value.length * rowHeight
+})
+
+const startIndex = computed(() => {
+  return Math.max(0, Math.floor(scrollTop.value / rowHeight) - bufferCount)
+})
+
+const endIndex = computed(() => {
+  return Math.min(
+    filteredStocks.value.length,
+    Math.floor((scrollTop.value + containerHeight.value) / rowHeight) + bufferCount
+  )
+})
+
+const visibleStocks = computed(() => {
+  return filteredStocks.value.slice(startIndex.value, endIndex.value)
+})
+
+const offsetY = computed(() => {
+  return startIndex.value * rowHeight
+})
+
+// 监听容器高度变化
+let resizeObserver: ResizeObserver | null = null
+let unlisten: (() => void) | null = null
+
+onMounted(async () => {
+  // 1. 初始化虚拟滚动容器高度监听
+  if (scrollContainer.value) {
+    containerHeight.value = scrollContainer.value.clientHeight
+    resizeObserver = new ResizeObserver((entries) => {
+      if (entries[0]) {
+        containerHeight.value = entries[0].contentRect.height
+      }
+    })
+    resizeObserver.observe(scrollContainer.value)
+  }
+
+  // 2. 监听 Tauri 后端进度事件
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    unlisten = await listen<number>('refresh-progress', (event) => {
+      progress.value = event.payload
+    })
+  } catch (e) {
+    console.warn('Tauri event listener not available')
+  }
+
+  // 3. 数据初始化：优先从 store 获取，如果没有则自动刷新
+  if (marketStore.stocks.length > 0) {
+    stocks.value = marketStore.stocks
+  } else {
+    refreshData()
+  }
+})
+
+onUnmounted(() => {
+  if (unlisten) unlisten()
+  if (resizeObserver) resizeObserver.disconnect()
+})
+// --- 虚拟滚动逻辑结束 ---
 
 // 筛选状态
 const filters = ref({
   minPrice: null as number | null,
   maxPrice: null as number | null,
   minChange: null as number | null,
-  maxChange: null as number | null,
-  onlyIndividualStocks: true // 默认开启“仅看个股”
+  maxChange: null as number | null
 })
 
 // 定义表格列
 const headers = [
-  { key: 'code', label: '代码', width: '100px' },
-  { key: 'name', label: '名称', width: '120px' },
-  { key: 'price', label: '最新价', width: '100px' },
-  { key: 'change', label: '涨跌幅', width: '100px' },
-  { key: 'speed', label: '涨速', width: '80px' },
-  { key: 'volume_ratio', label: '量比', width: '80px' },
-  { key: 'turnover', label: '换手率', width: '100px' },
-  { key: 'pe_dynamic', label: '市盈率(动)', width: '110px' },
-  { key: 'pe_static', label: '市盈率(静)', width: '110px' },
-  { key: 'pb', label: '市净率', width: '90px' },
-  { key: 'market_cap', label: '总市值', width: '120px' },
-  { key: 'circulating_market_cap', label: '流通市值', width: '120px' },
-  { key: 'main_inflow', label: '主力净流入', width: '130px' },
-  { key: 'main_inflow_ratio', label: '主力占比', width: '100px' },
-  { key: 'change_60d', label: '60日涨跌', width: '100px' },
-  { key: 'change_ytd', label: '今年涨跌', width: '100px' },
-  { key: 'amplitude', label: '振幅', width: '90px' },
-  { key: 'volume', label: '成交量', width: '110px' },
-  { key: 'amount', label: '成交额', width: '110px' },
-  { key: 'high', label: '最高', width: '90px' },
-  { key: 'low', label: '最低', width: '90px' },
-  { key: 'open', label: '今开', width: '90px' },
-  { key: 'prevClose', label: '昨收', width: '90px' },
+  // 核心组
+  { key: 'code', label: '代码', width: '100px', group: 'core' },
+  { key: 'name', label: '名称', width: '120px', group: 'core' },
+  // 动能组
+  { key: 'price', label: '最新价', width: '100px', group: 'momentum' },
+  { key: 'change', label: '涨跌幅', width: '100px', group: 'momentum' },
+  { key: 'speed', label: '涨速', width: '80px', group: 'momentum' },
+  { key: 'volume_ratio', label: '量比', width: '80px', group: 'momentum' },
+  // 量能组
+  { key: 'volume', label: '成交量', width: '110px', group: 'volume' },
+  { key: 'amount', label: '成交额', width: '110px', group: 'volume' },
+  { key: 'turnover_actual', label: '换手(实)', width: '100px', group: 'volume' },
+  { key: 'turnover', label: '换手率', width: '100px', group: 'volume' },
+  { key: 'limit_up', label: '外盘', width: '110px', group: 'volume' },
+  { key: 'limit_down', label: '内盘', width: '110px', group: 'volume' },
+  // 空间组
+  { key: 'amplitude', label: '振幅', width: '90px', group: 'space' },
+  { key: 'high', label: '最高', width: '90px', group: 'space' },
+  { key: 'low', label: '最低', width: '90px', group: 'space' },
+  { key: 'open', label: '今开', width: '90px', group: 'space' },
+  { key: 'prevClose', label: '昨收', width: '90px', group: 'space' },
+  // 基本面组
+  { key: 'market_cap', label: '总市值', width: '120px', group: 'fundamental' },
+  { key: 'circulating_market_cap', label: '流通市值', width: '120px', group: 'fundamental' },
+  { key: 'total_shares', label: '总股本', width: '120px', group: 'fundamental' },
+  { key: 'circulating_shares', label: '流通股', width: '120px', group: 'fundamental' },
+  { key: 'pe_static', label: '市盈(静)', width: '110px', group: 'fundamental' },
+  { key: 'pe_ttm', label: '市盈(TTM)', width: '110px', group: 'fundamental' },
+  { key: 'pb', label: '市净率', width: '90px', group: 'fundamental' },
 ]
+
+// 获取分组颜色的工具函数
+const getGroupHeaderClass = (group: string) => {
+  switch (group) {
+    case 'core': return 'text-primary font-bold'
+    case 'momentum': return 'text-orange-500/80'
+    case 'volume': return 'text-blue-500/80'
+    case 'space': return 'text-purple-500/80'
+    case 'fundamental': return 'text-emerald-500/80'
+    default: return 'text-foreground/40'
+  }
+}
 
 // 排序状态
 const sortConfig = ref({
@@ -267,8 +391,8 @@ const sortConfig = ref({
 
 const toggleSort = (key: string) => {
   if (sortConfig.value.key !== key) {
-    sortConfig.value.key = key
     sortConfig.value.order = 'desc'
+    sortConfig.value.key = key
   } else {
     if (sortConfig.value.order === 'desc') {
       sortConfig.value.order = 'asc'
@@ -281,29 +405,18 @@ const toggleSort = (key: string) => {
   }
 }
 
+// 当搜索或筛选条件变化时，重置滚动位置
+watch([searchQuery, filters, () => sortConfig.value.key, () => sortConfig.value.order], () => {
+  if (scrollContainer.value) {
+    scrollContainer.value.scrollTop = 0
+    scrollTop.value = 0
+  }
+})
+
 const filteredStocks = computed(() => {
   let result = [...stocks.value]
 
-  // 1. 基础个股筛选 (排除北交所、转债、退市)
-  if (filters.value.onlyIndividualStocks) {
-    result = result.filter(stock => {
-      const code = stock.code
-      const name = stock.name
-      
-      // 排除北交所 (4或8开头)
-      if (code.startsWith('4') || code.startsWith('8')) return false
-      
-      // 排除转债 (11或12开头，或者名字带"转")
-      if (code.startsWith('11') || code.startsWith('12') || name.includes('转')) return false
-      
-      // 排除退市 (名字带"退")
-      if (name.includes('退')) return false
-      
-      return true
-    })
-  }
-
-  // 2. 搜索过滤
+  // 1. 搜索过滤
   if (searchQuery.value) {
     const query = searchQuery.value.toLowerCase()
     result = result.filter(s => 
@@ -341,14 +454,11 @@ const resetFilters = () => {
     minPrice: null,
     maxPrice: null,
     minChange: null,
-    maxChange: null,
-    onlyIndividualStocks: true
+    maxChange: null
   }
   searchQuery.value = ''
   sortConfig.value = { key: '', order: 'none' }
 }
-
-let unlisten: (() => void) | null = null
 
 const fetchData = async () => {
   if (isRefreshing.value) return
@@ -358,6 +468,7 @@ const fetchData = async () => {
   progress.value = 0
   
   try {
+    const { invoke } = await import('@tauri-apps/api/core')
     const data = await invoke<any[]>('get_stock_data')
     stocks.value = data
     // 更新全局 store
@@ -372,29 +483,76 @@ const fetchData = async () => {
   }
 }
 
-onMounted(async () => {
-  unlisten = await listen<number>('refresh-progress', (event) => {
-    progress.value = event.payload
-  })
-
-  // 同步 store 中的数据到本地响应式变量
-  if (marketStore.stocks.length > 0) {
-    stocks.value = marketStore.stocks
-  }
-  // fetchData() 
-})
-
-onUnmounted(() => {
-  if (unlisten) unlisten()
-})
 
 const refreshData = () => {
   fetchData()
 }
 
-const exportData = () => {
-  // TODO: 实现导出功能
-  alert('导出功能开发中...')
+const exportData = async (format: string) => {
+  showExportMenu.value = false
+  
+  if (filteredStocks.value.length === 0) {
+    errorMessage.value = '没有可导出的数据'
+    return
+  }
+
+  try {
+    const defaultPath = localStorage.getItem('dataPath') || 'D:\\CranePoint_Data'
+    const fileName = `市场快照_${new Date().toISOString().replace(/[:.]/g, '-')}.${format}`
+    
+    // 调用 Tauri 保存对话框
+    const filePath = await save({
+      defaultPath: `${defaultPath}\\${fileName}`,
+      filters: [{
+        name: format.toUpperCase(),
+        extensions: [format]
+      }]
+    })
+
+    if (!filePath) return
+
+    isRefreshing.value = true
+    progress.value = 10
+    
+    // 准备数据
+    const exportHeaders = headers.map(h => h.label).join(',')
+    const exportRows = filteredStocks.value.map(stock => {
+      return headers.map(h => {
+        const val = stock[h.key]
+        return typeof val === 'number' ? val.toString() : `"${val}"`
+      }).join(',')
+    }).join('\n')
+    
+    const content = `${exportHeaders}\n${exportRows}`
+    
+    // 如果是 CSV，直接写入 UTF-8 with BOM 以支持 Excel 中文
+    if (format === 'csv') {
+      const encoder = new TextEncoder()
+      const bom = new Uint8Array([0xEF, 0xBB, 0xBF])
+      const data = encoder.encode(content)
+      const fullData = new Uint8Array(bom.length + data.length)
+      fullData.set(bom)
+      fullData.set(data, bom.length)
+      await writeFile(filePath, fullData)
+    } else {
+      // 其他格式暂时作为文本导出（PDF/XLSX 需要更复杂的库，此处先实装 CSV 的逻辑框架）
+      // 在实际生产中，PDF 和 XLSX 通常通过后端生成或专门的 JS 库
+      const encoder = new TextEncoder()
+      await writeFile(filePath, encoder.encode(content))
+    }
+    
+    progress.value = 100
+    setTimeout(() => {
+      isRefreshing.value = false
+      progress.value = 0
+    }, 1000)
+    
+    alert(`文件已成功保存至: ${filePath}`)
+  } catch (err: any) {
+    console.error('导出失败:', err)
+    errorMessage.value = `导出失败: ${err.message}`
+    isRefreshing.value = false
+  }
 }
 
 // 数值格式化工具

@@ -20,6 +20,7 @@ import {
 const activeCategory = ref('appearance') // 为了演示，默认切到外观
 const theme = ref('light')
 const themeStyle = ref('default')
+const dataPath = ref('D:\\CranePoint_Data')
 
 const menuItems = [
   { id: 'general', name: '常规设置', icon: Settings },
@@ -38,6 +39,23 @@ const setThemeStyle = (style: string) => {
   themeStyle.value = style
   localStorage.setItem('themeStyle', style)
   applyTheme()
+}
+
+const setDataPath = async () => {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: dataPath.value
+    })
+    if (selected) {
+      dataPath.value = selected as string
+      localStorage.setItem('dataPath', selected as string)
+    }
+  } catch (err) {
+    console.error('Failed to open directory dialog:', err)
+  }
 }
 
 const applyTheme = () => {
@@ -71,6 +89,7 @@ const applyTheme = () => {
 onMounted(() => {
   theme.value = localStorage.getItem('theme') || 'light'
   themeStyle.value = localStorage.getItem('themeStyle') || 'default'
+  dataPath.value = localStorage.getItem('dataPath') || 'D:\\CranePoint_Data'
   applyTheme()
 })
 </script>
@@ -374,10 +393,13 @@ onMounted(() => {
               <input 
                 type="text" 
                 readonly 
-                value="D:\CranePoint_Data" 
+                :value="dataPath" 
                 class="flex-1 bg-foreground/5 border border-thin rounded-lg px-3 py-2 text-sm text-foreground/60 outline-none" 
               />
-              <button class="px-4 py-2 bg-background border border-thin rounded-lg text-sm font-medium hover:bg-foreground/5 transition-colors">
+              <button 
+                @click="setDataPath"
+                class="px-4 py-2 bg-background border border-thin rounded-lg text-sm font-medium hover:bg-foreground/5 transition-colors"
+              >
                 更改目录
               </button>
             </div>

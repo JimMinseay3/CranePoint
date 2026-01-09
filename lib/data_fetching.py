@@ -93,10 +93,15 @@ def get_page_data(page, page_size):
         return []
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--page', type=int, default=1)
-    parser.add_argument('--size', type=int, default=500)
-    args = parser.parse_args()
-    
-    data = get_page_data(args.page, args.size)
-    print(json.dumps(data, ensure_ascii=False))
+    try:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--page', type=int, default=1)
+        parser.add_argument('--size', type=int, default=500)
+        args = parser.parse_args()
+        
+        data = get_page_data(args.page, args.size)
+        print(json.dumps(data, ensure_ascii=False))
+    except Exception as e:
+        print(f"ERROR: Main block exception: {str(e)}", file=sys.stderr)
+        print("[]") # 兜底输出空数组，防止 Rust 解析失败
+        sys.exit(1)
