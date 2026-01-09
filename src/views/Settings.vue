@@ -456,5 +456,4 @@ onMounted(() => {
 </template>
 
 <style scoped>
-@reference "../styles.css";
 </style>

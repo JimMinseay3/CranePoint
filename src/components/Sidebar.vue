@@ -16,9 +16,9 @@ const route = useRoute()
 const menuItems = [
   { name: '主页', path: '/', icon: Home },
   { name: '市场快照', path: '/market', icon: Camera },
-  { name: '数据下载', path: '/download', icon: Download },
-  { name: '数据分析', path: '/analysis', icon: BarChart2 },
   { name: '股票筛选', path: '/screening', icon: Filter },
+  { name: '个股数据', path: '/download', icon: Download },
+  { name: '数据分析', path: '/analysis', icon: BarChart2 },
 ]
 
 const navigate = (path: string) => {

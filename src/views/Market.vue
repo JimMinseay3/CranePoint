@@ -190,7 +190,7 @@
 
                 <!-- 动态指标列 -->
                 <!-- 动能组 -->
-                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.price - row.prevClose)">{{ row.price.toFixed(2) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="[getPriceColor(row.price - row.prevClose), getPriceUnderlineClass(row)]">{{ row.price.toFixed(2) }}</td>
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.change)">{{ (row.change > 0 ? '+' : '') + row.change.toFixed(2) }}%</td>
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.speed)">{{ (row.speed > 0 ? '+' : '') + row.speed.toFixed(2) }}</td>
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.volume_ratio.toFixed(2) }}</td>
@@ -239,14 +239,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { Search, RotateCw, Save, AlertCircle, X, ChevronUp, ChevronDown, ListFilter, LineChart, Clock, FileSpreadsheet, FileText as FileTextIcon, FileJson } from 'lucide-vue-next'
-import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
+import { Search, RotateCw, Save, AlertCircle, X, ChevronUp, ChevronDown, ListFilter, Clock, FileSpreadsheet, FileText as FileTextIcon, FileJson, LineChart } from 'lucide-vue-next'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { marketStore } from '../store/market'
 
+const route = useRoute()
 const searchQuery = ref('')
 const isRefreshing = ref(false)
 const progress = ref(0)
@@ -254,12 +254,12 @@ const errorMessage = ref('')
 const showFilters = ref(false)
 const showExportMenu = ref(false)
 
-const stocks = ref<any[]>([])
+const stocks = computed(() => marketStore.stocks)
 
 // --- 虚拟滚动逻辑开始 ---
 const scrollContainer = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
-const containerHeight = ref(800)
+const containerHeight = ref(800) // 提高默认初始值，防止初次渲染空白
 const rowHeight = 45
 const bufferCount = 10
 
@@ -276,14 +276,20 @@ const startIndex = computed(() => {
 })
 
 const endIndex = computed(() => {
+  const count = Math.ceil(containerHeight.value / rowHeight) + bufferCount * 2
   return Math.min(
     filteredStocks.value.length,
-    Math.floor((scrollTop.value + containerHeight.value) / rowHeight) + bufferCount
+    startIndex.value + count
   )
 })
 
 const visibleStocks = computed(() => {
-  return filteredStocks.value.slice(startIndex.value, endIndex.value)
+  const result = filteredStocks.value.slice(startIndex.value, endIndex.value)
+  // 安全保障：如果计算结果为空但实际有数据，返回首屏数据
+  if (result.length === 0 && filteredStocks.value.length > 0) {
+    return filteredStocks.value.slice(0, bufferCount * 2)
+  }
+  return result
 })
 
 const offsetY = computed(() => {
@@ -294,13 +300,41 @@ const offsetY = computed(() => {
 let resizeObserver: ResizeObserver | null = null
 let unlisten: (() => void) | null = null
 
-onMounted(async () => {
-  // 1. 初始化虚拟滚动容器高度监听
+const updateContainerHeight = () => {
   if (scrollContainer.value) {
-    containerHeight.value = scrollContainer.value.clientHeight
+    const height = scrollContainer.value.clientHeight
+    if (height > 0) {
+      containerHeight.value = height
+    }
+  }
+}
+
+onMounted(async () => {
+  if (route.query.search) {
+    searchQuery.value = route.query.search as string
+  }
+
+  // 0. 重置滚动位置
+  scrollTop.value = 0
+  if (scrollContainer.value) {
+    scrollContainer.value.scrollTop = 0
+  }
+  
+  // 1. 初始化虚拟滚动容器高度监听
+  await nextTick()
+  updateContainerHeight()
+  
+  // 即使 nextTick 没拿到，也要在短时间后再试一次
+  setTimeout(updateContainerHeight, 100)
+  setTimeout(updateContainerHeight, 500)
+  
+  if (scrollContainer.value) {
     resizeObserver = new ResizeObserver((entries) => {
       if (entries[0]) {
-        containerHeight.value = entries[0].contentRect.height
+        const newHeight = entries[0].contentRect.height
+        if (newHeight > 0) {
+          containerHeight.value = newHeight
+        }
       }
     })
     resizeObserver.observe(scrollContainer.value)
@@ -316,10 +350,8 @@ onMounted(async () => {
     console.warn('Tauri event listener not available')
   }
 
-  // 3. 数据初始化：优先从 store 获取，如果没有则自动刷新
-  if (marketStore.stocks.length > 0) {
-    stocks.value = marketStore.stocks
-  } else {
+  // 3. 数据初始化：如果没有数据则自动刷新
+  if (stocks.value.length === 0) {
     refreshData()
   }
 })
@@ -353,8 +385,8 @@ const headers = [
   { key: 'amount', label: '成交额', width: '110px', group: 'volume' },
   { key: 'turnover_actual', label: '换手(实)', width: '100px', group: 'volume' },
   { key: 'turnover', label: '换手率', width: '100px', group: 'volume' },
-  { key: 'limit_up', label: '外盘', width: '110px', group: 'volume' },
-  { key: 'limit_down', label: '内盘', width: '110px', group: 'volume' },
+  { key: 'limit_up', label: '涨停', width: '110px', group: 'volume' },
+  { key: 'limit_down', label: '跌停', width: '110px', group: 'volume' },
   // 空间组
   { key: 'amplitude', label: '振幅', width: '90px', group: 'space' },
   { key: 'high', label: '最高', width: '90px', group: 'space' },
@@ -470,7 +502,6 @@ const fetchData = async () => {
   try {
     const { invoke } = await import('@tauri-apps/api/core')
     const data = await invoke<any[]>('get_stock_data')
-    stocks.value = data
     // 更新全局 store
     marketStore.stocks = data
     marketStore.lastUpdated = Date.now()
@@ -576,11 +607,19 @@ const getPriceColor = (val: any) => {
   if (isNaN(num) || num === 0) return 'text-foreground/60'
   return num > 0 ? 'text-[#EA4335]' : 'text-[#34A853]' // 使用 Google 风格的红绿
 }
+
+const getPriceUnderlineClass = (row: any) => {
+  if (row.limit_up > 0 && row.price >= row.limit_up) {
+    return 'underline decoration-2 decoration-[#EA4335] underline-offset-4'
+  }
+  if (row.limit_down > 0 && row.price <= row.limit_down) {
+    return 'underline decoration-2 decoration-[#34A853] underline-offset-4'
+  }
+  return ''
+}
 </script>
 
 <style scoped>
-@reference "../styles.css";
-
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;

@@ -17,7 +17,10 @@ pub fn run() {
             get_stock_data,
             download_finance_data,
             list_downloaded_finance,
-            open_folder
+            open_folder,
+            run_stock_analysis,
+            list_analysis_archives,
+            download_market_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -139,7 +142,7 @@ async fn get_stock_data(app: AppHandle) -> Result<Value, String> {
     let page_size = 100; // 接口实际限制每页 100 条
     let total_pages = 70;  // 70 页覆盖约 7000 只股票
     
-    app.emit("refresh-progress", 10).unwrap();
+    app.emit("refresh-progress", 10).ok();
 
     let mut tasks = vec![];
     for page in 1..=total_pages {
@@ -164,7 +167,7 @@ async fn get_stock_data(app: AppHandle) -> Result<Value, String> {
                 }
                 success_count += 1;
                 let progress = 10 + (success_count * 90 / total_pages);
-                app.emit("refresh-progress", progress).unwrap();
+                app.emit("refresh-progress", progress).ok();
             }
             Err(e) => {
                 eprintln!("第 {} 页抓取失败: {}", i + 1, e);
@@ -181,7 +184,7 @@ async fn get_stock_data(app: AppHandle) -> Result<Value, String> {
 
     println!("成功抓取并去重，共计 {} 条记录", all_data.len());
     
-    app.emit("refresh-progress", 100).unwrap();
+    app.emit("refresh-progress", 100).ok();
     Ok(Value::Array(all_data))
 }
 
@@ -217,12 +220,20 @@ async fn download_finance_data(
         .spawn()
         .map_err(|e| format!("无法启动财报下载脚本: {}", e))?;
 
-    let _stdout = child.stdout.take().ok_or("无法打开 stdout")?;
+    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
     let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
+    let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
     let app_handle = app.clone();
     let (tx, mut rx) = tauri::async_runtime::channel::<String>(1);
+
+    // 处理 stdout (防止管道溢出)
+    let stdout_task = tauri::async_runtime::spawn(async move {
+        while let Ok(Some(_line)) = stdout_reader.next_line().await {
+            // 暂时忽略 stdout 内容，主要为了防止阻塞
+        }
+    });
 
     // 处理 stderr 用于所有实时消息、进度和结果
     let stderr_task = tauri::async_runtime::spawn(async move {
@@ -230,10 +241,22 @@ async fn download_finance_data(
         while let Ok(Some(line)) = stderr_reader.next_line().await {
             if line.starts_with("PROGRESS:") {
                 if let Ok(p) = line.trim_start_matches("PROGRESS:").trim().parse::<i32>() {
-                    app_handle.emit("download-progress", p).unwrap();
+                    let _ = app_handle.emit("download-progress", json!({
+                        "progress": p,
+                        "message": "正在同步数据..."
+                    }));
                 }
             } else if line.starts_with("INFO:") || line.starts_with("ERROR:") {
-                app_handle.emit("download-status", line.clone()).unwrap();
+                let _ = app_handle.emit("download-progress", json!({
+                    "progress": 0, // 保持当前进度或设为 0
+                    "message": line.clone()
+                }));
+            } else if line.starts_with("WARNING:") {
+                let _ = app_handle.emit("download-progress", json!({
+                    "progress": 0,
+                    "message": "同步警告",
+                    "warning": line.trim_start_matches("WARNING:").trim().to_string()
+                }));
             } else if line.starts_with("SUCCESS:") {
                 last_success = line.trim_start_matches("SUCCESS:").trim().to_string();
             }
@@ -243,12 +266,211 @@ async fn download_finance_data(
 
     let final_result = rx.recv().await.unwrap_or_else(|| "下载完成".to_string());
     let _ = stderr_task.await;
+    let _ = stdout_task.await;
     let status = child.wait().await.map_err(|e| e.to_string())?;
     if status.success() {
         Ok(final_result)
     } else {
         Err(format!("下载脚本执行失败 (退出码: {:?})。请检查标的代码是否正确或网络是否连接。", status.code()))
     }
+}
+
+#[tauri::command]
+async fn run_stock_analysis(
+    app: AppHandle,
+    symbol: String,
+    path: String,
+) -> Result<String, String> {
+    let python_path = if cfg!(windows) {
+        "../.venv/Scripts/python.exe"
+    } else {
+        "../.venv/bin/python"
+    };
+
+    println!("DEBUG: 正在启动 Python 分析引擎, 目标股票: {}", symbol);
+
+    let mut child = Command::new(python_path)
+        .arg("../lib/data_analysis.py")
+        .arg("--symbol")
+        .arg(symbol)
+        .arg("--path")
+        .arg(path)
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动分析引擎: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
+    let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let app_handle = app.clone();
+    let (tx, mut rx) = tauri::async_runtime::channel::<String>(1);
+
+    // 处理 stdout (防止管道溢出)
+    let stdout_task = tauri::async_runtime::spawn(async move {
+        while let Ok(Some(_line)) = stdout_reader.next_line().await {
+            // 暂时忽略 stdout 内容
+        }
+    });
+
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        let mut last_success = String::new();
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if line.starts_with("INFO:") {
+                let _ = app_handle.emit("analysis-status", line.trim_start_matches("INFO:").trim());
+            } else if line.starts_with("SUCCESS:") {
+                last_success = line.trim_start_matches("SUCCESS:").trim().to_string();
+            } else if line.starts_with("ERROR:") {
+                let error_msg = line.trim_start_matches("ERROR:").trim();
+                let _ = app_handle.emit("analysis-status", format!("错误: {}", error_msg));
+                eprintln!("Python Error: {}", line);
+            }
+        }
+        let _ = tx.send(last_success).await;
+    });
+
+    let final_result = rx.recv().await.unwrap_or_default();
+    let _ = stderr_task.await;
+    let _ = stdout_task.await;
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    
+    if status.success() && !final_result.is_empty() {
+        Ok(final_result)
+    } else {
+        Err(format!("分析脚本执行失败 (退出码: {:?})。请检查网络或代码输入是否正确。", status.code()))
+    }
+}
+
+#[tauri::command]
+async fn download_market_history(
+    app: AppHandle,
+    symbol: String,
+    start_date: String,
+    end_date: String,
+    path: String,
+    level: String,
+    include_index: bool,
+) -> Result<String, String> {
+    let python_path = if cfg!(windows) {
+        "../.venv/Scripts/python.exe"
+    } else {
+        "../.venv/bin/python"
+    };
+
+    println!("DEBUG: 正在启动 Python 导出引擎, 目标股票: {}, 范围: {} - {}, 等级: {}, 同步指数: {}", symbol, start_date, end_date, level, include_index);
+
+    let mut child = Command::new(python_path)
+        .arg("../lib/data_analysis.py")
+        .arg("--mode")
+        .arg("history")
+        .arg("--symbol")
+        .arg(symbol)
+        .arg("--start")
+        .arg(start_date)
+        .arg("--end")
+        .arg(end_date)
+        .arg("--path")
+        .arg(path)
+        .arg("--level")
+        .arg(level)
+        .arg("--include_index")
+        .arg(include_index.to_string())
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动导出引擎: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
+    let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let app_handle = app.clone();
+    
+    // 异步读取 stdout 以获取最终结果 JSON
+    let (tx, mut rx) = tauri::async_runtime::channel::<String>(1);
+    let stdout_task = tauri::async_runtime::spawn(async move {
+        let mut final_json = String::new();
+        while let Ok(Some(line)) = stdout_reader.next_line().await {
+            if line.starts_with('{') {
+                final_json = line;
+            }
+        }
+        let _ = tx.send(final_json).await;
+    });
+
+    // 异步读取 stderr 以获取状态更新
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if line.starts_with("INFO:") {
+                let msg = line.trim_start_matches("INFO:").trim().to_string();
+                let _ = app_handle.emit("history-status", msg);
+            } else if line.starts_with("ERROR:") {
+                let msg = line.trim_start_matches("ERROR:").trim().to_string();
+                let _ = app_handle.emit("history-status", format!("错误: {}", msg));
+            }
+        }
+    });
+
+    let final_result = rx.recv().await.unwrap_or_default();
+    let _ = stderr_task.await;
+    let _ = stdout_task.await;
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    if status.success() && !final_result.is_empty() {
+        Ok(final_result)
+    } else {
+        Err(format!("导出脚本执行失败 (退出码: {:?})", status.code()))
+    }
+}
+
+#[tauri::command]
+fn list_analysis_archives(path: String) -> Result<Vec<Value>, String> {
+    let mut results = Vec::new();
+    let dir = std::path::Path::new(&path);
+    
+    if !dir.exists() {
+        return Ok(results);
+    }
+
+    // 遍历基础目录下的子目录 (股票代码目录)
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_dir() {
+                    let stock_dir = entry.path();
+                    let analysis_dir = stock_dir.join("analysis");
+                    
+                    if analysis_dir.exists() {
+                        let stock_name = entry.file_name().to_string_lossy().into_owned();
+                        let metadata = analysis_dir.metadata().ok();
+                        let updated_at = metadata
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        
+                        results.push(json!({
+                            "name": stock_name,
+                            "updated_at": updated_at
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    
+    results.sort_by(|a, b| {
+        let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+
+    Ok(results)
 }
 
 #[tauri::command]

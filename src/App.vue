@@ -32,13 +32,13 @@ onMounted(() => {
     <TitleBar />
     <div class="flex flex-1 overflow-hidden">
       <Sidebar />
-      <main class="flex-1 overflow-y-auto relative">
-        <router-view v-slot="{ Component }">
+      <main class="flex-1 overflow-hidden relative">
+        <router-view v-slot="{ Component, route }">
           <transition 
             name="fade" 
             mode="out-in"
           >
-            <component :is="Component" />
+            <component :is="Component" :key="route.path" />
           </transition>
         </router-view>
       </main>

@@ -98,8 +98,6 @@ const isCollapsed = ref(false)
 </template>
 
 <style scoped>
-@reference "../styles.css";
-
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;

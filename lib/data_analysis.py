@@ -127,10 +127,68 @@ def run_analysis(symbol, base_path="data"):
         print(f"ERROR: {error_msg}", file=sys.stderr)
         sys.exit(1)
 
+def download_history(symbol, start_date, end_date, save_path, level='standard', include_index=True):
+    print(f"INFO: 启动历史数据下载，代码: {symbol}, 范围: {start_date} - {end_date}, 等级: {level}", file=sys.stderr)
+    try:
+        # 确保保存路径存在
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+            
+        # 1. 下载个股历史数据
+        df = quant.get_history_range(symbol, start_date, end_date, level=level)
+        if df.empty:
+            print(f"ERROR: 未能获取到 {symbol} 在指定范围内的历史数据", file=sys.stderr)
+            return None
+            
+        # 生成文件名并保存
+        filename = f"{symbol}_history_{start_date}_{end_date}_{level}.csv"
+        full_path = os.path.join(save_path, filename)
+        df.to_csv(full_path, index=False, encoding='utf-8-sig')
+        print(f"INFO: 个股数据已保存至: {full_path}", file=sys.stderr)
+
+        # 2. 如果需要，同步指数数据
+        index_files = []
+        if include_index:
+            print(f"INFO: 正在同步基准指数数据 (上证/沪深300)...", file=sys.stderr)
+            for idx_symbol, idx_name in [("000001", "上证指数"), ("000300", "沪深300")]:
+                idx_df = quant.get_index_history(idx_symbol, start_date, end_date)
+                if not idx_df.empty:
+                    idx_filename = f"INDEX_{idx_symbol}_{start_date}_{end_date}.csv"
+                    idx_path = os.path.join(save_path, idx_filename)
+                    idx_df.to_csv(idx_path, index=False, encoding='utf-8-sig')
+                    index_files.append(idx_path)
+            print(f"INFO: 指数数据同步完成", file=sys.stderr)
+            
+        return {"main_file": full_path, "index_files": index_files}
+    except Exception as e:
+        print(f"ERROR: 下载历史数据失败: {str(e)}", file=sys.stderr)
+        return None
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--symbol', type=str, required=True)
-    parser.add_argument('--path', type=str, default='data')
+    parser = argparse.ArgumentParser(description='Stock Data Analysis & Export')
+    parser.add_argument('--symbol', type=str, help='Stock symbol')
+    parser.add_argument('--mode', type=str, default='analysis', choices=['analysis', 'history'], help='Run mode')
+    parser.add_argument('--start', type=str, help='Start date (YYYYMMDD)')
+    parser.add_argument('--end', type=str, help='End date (YYYYMMDD)')
+    parser.add_argument('--path', type=str, default='data', help='Base path for data')
+    parser.add_argument('--level', type=str, default='standard', help='Data level (lite/standard/research)')
+    parser.add_argument('--include_index', type=str, default='true', help='Include index data (true/false)')
+    
     args = parser.parse_args()
     
-    run_analysis(args.symbol, args.path)
+    if args.mode == 'analysis':
+        if not args.symbol:
+            print("Error: symbol is required for analysis mode")
+            sys.exit(1)
+        result = run_analysis(args.symbol, args.path)
+        if result:
+            print(json.dumps(result, cls=MyEncoder, ensure_ascii=False))
+    elif args.mode == 'history':
+        if not all([args.symbol, args.start, args.end]):
+            print("Error: symbol, start, and end are required for history mode")
+            sys.exit(1)
+        
+        include_index = args.include_index.lower() == 'true'
+        result = download_history(args.symbol, args.start, args.end, args.path, args.level, include_index)
+        if result:
+            print(json.dumps({"status": "success", "data": result}, ensure_ascii=False))
