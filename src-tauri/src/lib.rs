@@ -141,6 +141,8 @@ async fn download_finance_data(
         "../.venv/bin/python"
     };
 
+    println!("DEBUG: 正在启动 Python 分析脚本, 路径: {}, 目标股票: {}", python_path, symbol);
+
     let mut child = Command::new(python_path)
         .arg("../lib/finance_fetching.py")
         .arg("--symbol")
@@ -188,6 +190,92 @@ async fn download_finance_data(
         Ok(final_result)
     } else {
         Err(format!("下载脚本执行失败 (退出码: {:?})。请检查标的代码是否正确或网络是否连接。", status.code()))
+    }
+}
+
+#[tauri::command]
+async fn run_stock_analysis(
+    app: AppHandle,
+    symbol: String,
+    path: String,
+) -> Result<String, String> {
+    let mut python_path = if cfg!(windows) {
+        "../.venv/Scripts/python.exe".to_string()
+    } else {
+        "../.venv/bin/python".to_string()
+    };
+
+    // 检查路径是否存在，如果不存在尝试 alternate 路径
+    if !std::path::Path::new(&python_path).exists() {
+        println!("WARN: 默认 Python 路径不存在: {}, 尝试备选路径...", python_path);
+        if cfg!(windows) {
+            let alt_path = "../venv/Scripts/python.exe";
+            if std::path::Path::new(alt_path).exists() {
+                python_path = alt_path.to_string();
+            } else {
+                // 如果虚拟环境找不到，尝试系统 python
+                python_path = "python".to_string();
+            }
+        }
+    }
+
+    println!("DEBUG: [Analysis] 最终使用 Python 路径: {}, 股票: {}", python_path, symbol);
+
+    let mut child = Command::new(&python_path)
+        .arg("../lib/data_analysis.py")
+        .arg("--symbol")
+        .arg(symbol)
+        .arg("--path")
+        .arg(path)
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动分析脚本: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
+    let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let app_handle = app.clone();
+    let (tx, mut rx) = tauri::async_runtime::channel::<String>(1);
+
+    // 处理 stderr 用于实时状态更新
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        let mut last_success = String::from("");
+        let mut error_traceback = String::from("");
+        
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if line.starts_with("INFO:") {
+                app_handle.emit("analysis-status", line.clone()).unwrap();
+            } else if line.starts_with("SUCCESS:") {
+                last_success = line.trim_start_matches("SUCCESS:").trim().to_string();
+            } else if line.starts_with("ERROR:") {
+                error_traceback = line.trim_start_matches("ERROR:").trim().to_string();
+                app_handle.emit("analysis-status", line.clone()).unwrap();
+            } else {
+                // 捕获没有前缀的其他错误信息（如 Python 原始 traceback）
+                if !line.trim().is_empty() && last_success.is_empty() {
+                    error_traceback.push_str(&line);
+                    error_traceback.push('\n');
+                }
+            }
+        }
+        (last_success, error_traceback)
+    });
+
+    let (final_result, error_traceback) = stderr_task.await.unwrap_or((String::new(), String::new()));
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    
+    if status.success() && !final_result.is_empty() {
+        Ok(final_result)
+    } else {
+        let err_msg = if !error_traceback.is_empty() {
+            error_traceback
+        } else {
+            format!("脚本退出码: {:?}", status.code())
+        };
+        Err(format!("分析失败: {}", err_msg))
     }
 }
 
@@ -275,7 +363,8 @@ pub fn run() {
             get_stock_data,
             download_finance_data,
             list_downloaded_finance,
-            open_folder
+            open_folder,
+            run_stock_analysis
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

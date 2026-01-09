@@ -1,0 +1,17 @@
+{
+    "symbol": "000981",
+    "name": "山子高科",
+    "updated_at": "2026-01-09 09:32:27",
+    "risk": {
+        "hv20": 47.33,
+        "hv60": 34.28
+    },
+    "liquidity": {
+        "total_ask_depth": 2215800,
+        "total_bid_depth": 8414200,
+        "assessment": "充裕"
+    },
+    "fund_flow": {
+        "details": [
+            {
+                "日期": 

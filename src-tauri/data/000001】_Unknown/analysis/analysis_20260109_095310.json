@@ -1,0 +1,28 @@
+{
+    "symbol": "000001】",
+    "name": "Unknown",
+    "updated_at": "2026-01-09 09:53:10",
+    "risk": {
+        "hv20": 0,
+        "hv60": 0
+    },
+    "liquidity": {
+        "total_ask_depth": 0,
+        "total_bid_depth": 0,
+        "assessment": "未知"
+    },
+    "fund_flow": {
+        "details": [],
+        "rose_chart": [],
+        "weekly_main_net": 0
+    },
+    "fundamentals": {
+        "deduct_net_profit": "N/A",
+        "report_period": "N/A"
+    },
+    "industry": {
+        "name": "未知",
+        "correlation": 0
+    },
+    "history": []
+}

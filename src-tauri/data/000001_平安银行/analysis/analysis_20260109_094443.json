@@ -1,0 +1,17 @@
+{
+    "symbol": "000001",
+    "name": "平安银行",
+    "updated_at": "2026-01-09 09:44:43",
+    "risk": {
+        "hv20": 19.23,
+        "hv60": 19.67
+    },
+    "liquidity": {
+        "total_ask_depth": 1631300,
+        "total_bid_depth": 11058600,
+        "assessment": "充裕"
+    },
+    "fund_flow": {
+        "details": [
+            {
+                "日期": 

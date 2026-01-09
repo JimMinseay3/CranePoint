@@ -22,12 +22,19 @@ const isCollapsed = ref(false)
 <template>
   <div class="h-full flex flex-col p-6 overflow-hidden bg-background">
     <!-- 顶部标题栏 -->
-    <div class="flex-none mb-6">
-      <div class="flex items-center gap-3 mb-1">
-        <component :is="icon" v-if="icon" class="w-8 h-8 text-primary" />
-        <h1 class="text-3xl font-semibold tracking-tight text-foreground">{{ title }}</h1>
+    <div class="flex-none mb-6 flex items-start justify-between">
+      <div>
+        <div class="flex items-center gap-3 mb-1">
+          <component :is="icon" v-if="icon" class="w-8 h-8 text-primary" />
+          <h1 class="text-3xl font-semibold tracking-tight text-foreground">{{ title }}</h1>
+        </div>
+        <p v-if="subtitle" class="text-sm text-foreground/50 ml-11">{{ subtitle }}</p>
       </div>
-      <p v-if="subtitle" class="text-sm text-foreground/50 ml-11">{{ subtitle }}</p>
+      
+      <!-- 标题栏右侧额外插槽 -->
+      <div v-if="$slots['header-extra']" class="flex items-center">
+        <slot name="header-extra"></slot>
+      </div>
     </div>
 
     <!-- 主体内容区 -->
