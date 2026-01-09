@@ -66,6 +66,22 @@ async fn fetch_stock_page(page: i32, page_size: i32) -> Result<Vec<Value>, Strin
             let f12 = item.get("f12").and_then(|v| v.as_str()).unwrap_or("-");
             if f12 == "-" { continue; }
 
+            // 彻底过滤北交所股票 (8, 4, 92 开头)
+            if f12.starts_with('8') || f12.starts_with('4') || f12.starts_with("92") {
+                continue;
+            }
+
+            // 过滤转债 (11, 12 开头)
+            if f12.starts_with("11") || f12.starts_with("12") {
+                continue;
+            }
+
+            let name = item.get("f14").and_then(|v| v.as_str()).unwrap_or("-");
+            // 过滤退市股
+            if name.contains("退") {
+                continue;
+            }
+
             let f2 = item.get("f2").and_then(|v| v.as_f64()).unwrap_or(0.0);
             if f2 == 0.0 || f2.is_nan() { continue; } // 过滤停牌或无价数据
 
