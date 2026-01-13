@@ -144,24 +144,47 @@
       >
         <div :style="{ height: `${totalHeight}px`, position: 'relative' }">
           <table class="w-full min-w-max border-collapse text-left text-sm table-auto bg-background">
-            <thead class="sticky top-0 bg-background/95 backdrop-blur-md z-40 border-b border-thin">
+            <thead class="sticky top-0 bg-background z-40 border-b border-thin">
+              <!-- 分组标题行 -->
+              <tr class="border-b border-thin/50">
+                <th 
+                  v-for="group in headerGroups" 
+                  :key="group.name"
+                  :colspan="group.count"
+                  class="px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider border-r border-thin last:border-r-0"
+                  :class="[
+                    getGroupHeaderClass(group.group),
+                    { 
+                      'sticky left-0 z-[70] bg-background': group.name === 'core',
+                      'bg-background': group.name !== 'core'
+                    }
+                  ]"
+                >
+                  <div class="flex items-center gap-1.5">
+                    <div class="w-1 h-3 rounded-full bg-current opacity-50"></div>
+                    {{ group.label }}
+                  </div>
+                </th>
+              </tr>
+              <!-- 字段名称行 -->
               <tr>
                 <th 
                   v-for="header in headers" 
                   :key="header.key" 
                   @click="toggleSort(header.key)"
-                  class="px-4 py-3.5 font-semibold border-r border-thin last:border-r-0 whitespace-nowrap bg-background cursor-pointer hover:bg-foreground/[0.05] transition-colors group/th"
+                  class="px-4 py-3 font-semibold border-thin last:border-r-0 whitespace-nowrap cursor-pointer transition-colors group/th"
                    :class="[
                      { 
-                       'sticky left-0 z-50 shadow-[1px_0_0_0_rgba(var(--color-thin))]': header.key === 'code',
-                       'sticky left-[100px] z-50 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]': header.key === 'name',
+                       'sticky left-0 z-[70] bg-background border-r-0': header.key === 'code',
+                       'sticky left-[100px] z-[70] bg-background border-r shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]': header.key === 'name',
+                       'border-r bg-background hover:bg-muted/50': header.key !== 'code' && header.key !== 'name'
                      },
                      getGroupHeaderClass(header.group)
                    ]"
-                  :style="{ minWidth: header.width }"
+                  :style="{ width: header.width, minWidth: header.width }"
                 >
                   <div class="flex items-center justify-between gap-2">
-                    <span>{{ header.label }}</span>
+                    <span class="text-xs">{{ header.label }}</span>
                     <div class="flex flex-col opacity-0 group-hover/th:opacity-100 transition-opacity" :class="{ 'opacity-100': sortConfig.key === header.key }">
                       <ChevronUp class="w-3 h-3 -mb-1" :class="{ 'text-primary': sortConfig.key === header.key && sortConfig.order === 'asc' }" />
                       <ChevronDown class="w-3 h-3" :class="{ 'text-primary': sortConfig.key === header.key && sortConfig.order === 'desc' }" />
@@ -180,13 +203,13 @@
               <tr 
                 v-for="(row, index) in visibleStocks" 
                 :key="row.code" 
-                class="hover:bg-foreground/[0.03] transition-colors group"
-                :class="{ 'bg-foreground/[0.01]': (startIndex + index) % 2 === 0 }"
+                class="hover:bg-muted/30 transition-colors group"
+                :class="{ 'bg-background': (startIndex + index) % 2 !== 0, 'bg-muted/10': (startIndex + index) % 2 === 0 }"
                 :style="{ height: `${rowHeight}px` }"
               >
                 <!-- 固定列：代码、名称 -->
-                <td class="px-4 py-3 border-r border-thin text-blue-500 font-mono sticky left-0 z-10 bg-background group-hover:bg-foreground/[0.03] transition-colors shadow-[1px_0_0_0_rgba(var(--color-thin))]">{{ row.code }}</td>
-                <td class="px-4 py-3 border-r border-thin font-medium sticky left-[100px] z-10 bg-background group-hover:bg-foreground/[0.03] transition-colors shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">{{ row.name }}</td>
+                <td class="px-4 py-3 border-r-0 border-thin text-blue-500 font-mono sticky left-0 z-20 bg-background group-hover:bg-inherit transition-colors" :style="{ width: '100px', minWidth: '100px' }">{{ row.code }}</td>
+                <td class="px-4 py-3 border-r border-thin font-medium sticky left-[100px] z-20 bg-background group-hover:bg-inherit transition-colors shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]" :style="{ width: '120px', minWidth: '120px' }">{{ row.name }}</td>
 
                 <!-- 动态指标列 -->
                 <!-- 动能组 -->
@@ -209,6 +232,11 @@
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.low - row.prevClose)">{{ row.low.toFixed(2) }}</td>
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.open.toFixed(2) }}</td>
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ row.prevClose.toFixed(2) }}</td>
+
+                <!-- 资金流组 -->
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.main_inflow)">{{ formatNumber(row.main_inflow) }}</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.main_inflow_ratio)">{{ row.main_inflow_ratio.toFixed(2) }}%</td>
+                <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums" :class="getPriceColor(row.change_ytd)">{{ (row.change_ytd > 0 ? '+' : '') + row.change_ytd.toFixed(2) }}%</td>
 
                 <!-- 基本面组 -->
                 <td class="px-4 py-3 border-r border-thin text-right font-mono tabular-nums text-foreground/70">{{ formatNumber(row.market_cap) }}</td>
@@ -393,6 +421,10 @@ const headers = [
   { key: 'low', label: '最低', width: '90px', group: 'space' },
   { key: 'open', label: '今开', width: '90px', group: 'space' },
   { key: 'prevClose', label: '昨收', width: '90px', group: 'space' },
+  // 资金流组
+  { key: 'main_inflow', label: '主力净流', width: '110px', group: 'flow' },
+  { key: 'main_inflow_ratio', label: '主力占比', width: '100px', group: 'flow' },
+  { key: 'change_ytd', label: '年内涨跌', width: '100px', group: 'flow' },
   // 基本面组
   { key: 'market_cap', label: '总市值', width: '120px', group: 'fundamental' },
   { key: 'circulating_market_cap', label: '流通市值', width: '120px', group: 'fundamental' },
@@ -403,14 +435,43 @@ const headers = [
   { key: 'pb', label: '市净率', width: '90px', group: 'fundamental' },
 ]
 
+// 计算表头分组
+const headerGroups = computed(() => {
+  const groups: { name: string, label: string, count: number, group: string }[] = []
+  const groupMap: Record<string, string> = {
+    'core': '核心行情',
+    'momentum': '动能指标',
+    'volume': '量能分析',
+    'space': '空间位置',
+    'flow': '资金流向',
+    'fundamental': '基本面'
+  }
+
+  headers.forEach(header => {
+    const lastGroup = groups[groups.length - 1]
+    if (lastGroup && lastGroup.group === header.group) {
+      lastGroup.count++
+    } else {
+      groups.push({
+        name: header.group,
+        label: groupMap[header.group] || '',
+        count: 1,
+        group: header.group
+      })
+    }
+  })
+  return groups
+})
+
 // 获取分组颜色的工具函数
 const getGroupHeaderClass = (group: string) => {
   switch (group) {
     case 'core': return 'text-primary font-bold'
-    case 'momentum': return 'text-orange-500/80'
-    case 'volume': return 'text-blue-500/80'
-    case 'space': return 'text-purple-500/80'
-    case 'fundamental': return 'text-emerald-500/80'
+    case 'momentum': return 'text-orange-600 font-bold'
+    case 'volume': return 'text-blue-600 font-bold'
+    case 'space': return 'text-purple-600 font-bold'
+    case 'flow': return 'text-cyan-600 font-bold'
+    case 'fundamental': return 'text-emerald-600 font-bold'
     default: return 'text-foreground/40'
   }
 }

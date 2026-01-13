@@ -28,8 +28,16 @@ import {
 } from 'lucide-vue-next'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { marketStore } from '../store/market'
 
 const activeCategory = ref('finance')
+
+// --- 状态定义开始 ---
+
+// 全局标的选择相关
+const globalSearchQuery = ref('')
+const selectedStock = ref<any>(null)
+const showSearchDropdown = ref(false)
 
 // 下载相关状态
 const isDownloading = ref(false)
@@ -92,6 +100,7 @@ interface ArchiveItem {
 const analysisSymbol = ref('')
 const isAnalyzing = ref(false)
 const analysisStatus = ref('')
+const analysisError = ref('')
 const analysisResult = ref<AnalysisResult | null>(null)
 const archives = ref<ArchiveItem[]>([])
 
@@ -107,6 +116,38 @@ const marketHistoryConfig = ref({
 const isDownloadingHistory = ref(false)
 const historyStatus = ref('')
 const historyProgress = ref(0)
+
+// --- 状态定义结束 ---
+
+// 搜索匹配逻辑
+const searchResults = computed(() => {
+  if (!globalSearchQuery.value) return []
+  const query = globalSearchQuery.value.toLowerCase()
+  return marketStore.stocks.filter(s => 
+    s.code.toLowerCase().includes(query) || 
+    s.name.toLowerCase().includes(query)
+  ).slice(0, 10)
+})
+
+// 选择标的
+const selectStock = (stock: any) => {
+  selectedStock.value = stock
+  globalSearchQuery.value = ''
+  showSearchDropdown.value = false
+  
+  // 同步到各个配置中
+  financeConfig.value.symbol = stock.code
+  analysisSymbol.value = stock.code
+  marketHistoryConfig.value.symbol = stock.code
+}
+
+// 监听配置中的 symbol 变化，反向更新全局标的 (用于点击侧边栏“本地已下载”等场景)
+watch(() => financeConfig.value.symbol, (newVal) => {
+  if (newVal && (!selectedStock.value || selectedStock.value.code !== newVal)) {
+    const stock = marketStore.stocks.find(s => s.code === newVal)
+    if (stock) selectedStock.value = stock
+  }
+})
 
 const startHistoryDownload = async () => {
   if (!marketHistoryConfig.value.symbol) return
@@ -294,6 +335,7 @@ const startAnalysis = async () => {
   if (!analysisSymbol.value) return
   isAnalyzing.value = true
   analysisStatus.value = '正在初始化分析模块...'
+  analysisError.value = ''
   analysisResult.value = null
   
   // 销毁旧图表
@@ -316,11 +358,11 @@ const startAnalysis = async () => {
         }
       } catch (parseErr) {
         console.error('Failed to parse analysis result:', parseErr)
-        analysisStatus.value = `解析结果失败: ${parseErr}`
+        analysisError.value = `解析结果失败: ${parseErr}`
       }
     }
   } catch (err: any) {
-    analysisStatus.value = `分析失败: ${err}`
+    analysisError.value = `分析失败: ${err}`
   } finally {
     isAnalyzing.value = false
   }
@@ -453,15 +495,35 @@ let unlistenHistory: any = null
 const route = useRoute()
 
 onMounted(async () => {
+  // 如果全局 store 没数据，尝试从后端拉取一次基础数据
+  if (marketStore.stocks.length === 0) {
+    try {
+      const res = await invoke<any[]>('get_stock_data')
+      if (res && res.length > 0) {
+        marketStore.stocks = res
+        marketStore.lastUpdated = Date.now()
+      }
+    } catch (err) {
+      console.error('Failed to init market data in Download view:', err)
+    }
+  }
+
   // 处理路由参数
   if (route.query.symbol) {
     const symbol = route.query.symbol as string
+    // 尝试在现有列表中查找标的
+    const stock = marketStore.stocks.find(s => s.code === symbol)
+    if (stock) {
+      selectStock(stock)
+    } else {
+      // 如果没找到（可能 marketStore 还没完全加载或 localStorage 为空），至少同步 symbol
+      financeConfig.value.symbol = symbol
+      analysisSymbol.value = symbol
+    }
+
     if (route.query.mode === 'analysis') {
       activeCategory.value = 'dashboard'
-      analysisSymbol.value = symbol
       startAnalysis()
-    } else {
-      financeConfig.value.symbol = symbol
     }
   }
 
@@ -528,52 +590,88 @@ onUnmounted(() => {
   >
     <!-- 顶部操作栏 -->
     <template #header-extra>
-      <div class="flex items-center gap-2">
-        <!-- 财报下载/行情同步搜索 -->
-        <div v-if="['market'].includes(activeCategory)" class="relative group">
-          <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-foreground/30 group-focus-within:text-primary transition-colors" />
-          <input 
-            v-model="financeConfig.symbol"
-            @keyup.enter="startFinanceDownload"
-            type="text" 
-            placeholder="输入股票代码 (如 000001)"
-            class="pl-9 pr-4 py-2 bg-foreground/5 border border-foreground/10 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all w-64"
-          />
-        </div>
-        
-        <!-- 分析搜索 -->
-        <div v-if="!['finance', 'market', 'settings', 'archives'].includes(activeCategory)" class="flex items-center gap-2">
+      <div class="flex-1 flex items-center justify-between">
+        <!-- 左侧：全局标的选择器 -->
+        <div class="flex items-center gap-3">
           <div class="relative group">
             <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-foreground/30 group-focus-within:text-primary transition-colors" />
             <input 
-              v-model="analysisSymbol"
-              @keyup.enter="startAnalysis"
+              v-model="globalSearchQuery"
+              @focus="showSearchDropdown = true"
+              @input="showSearchDropdown = true"
               type="text" 
-              placeholder="输入分析代码 (如 000001)"
-              class="pl-9 pr-4 py-2 bg-foreground/5 border border-foreground/10 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all w-64"
+              placeholder="输入代码或名称"
+              class="pl-9 pr-4 py-2 bg-foreground/5 border border-foreground/10 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all w-80"
             />
+            
+            <!-- 搜索下拉列表 -->
+            <div v-if="showSearchDropdown && searchResults.length > 0" 
+                 class="absolute top-full left-0 right-0 mt-2 bg-background border border-foreground/10 rounded-xl shadow-xl overflow-hidden z-50">
+              <div 
+                v-for="stock in searchResults" 
+                :key="stock.code"
+                @click="selectStock(stock)"
+                class="px-4 py-2.5 hover:bg-foreground/5 cursor-pointer flex items-center justify-between group/item transition-colors"
+              >
+                <div class="flex flex-col">
+                  <span class="text-sm font-medium group-hover/item:text-primary transition-colors">{{ stock.name }}</span>
+                  <span class="text-xs text-foreground/40">{{ stock.code }}</span>
+                </div>
+                <ChevronRight class="w-4 h-4 text-foreground/20 group-hover/item:text-primary transition-all transform translate-x-0 group-hover/item:translate-x-1" />
+              </div>
+            </div>
+            
+            <!-- 点击外部关闭下拉框 -->
+            <div v-if="showSearchDropdown" @click="showSearchDropdown = false" class="fixed inset-0 z-40"></div>
           </div>
+
+          <!-- 选中标的信息展示 -->
+          <div v-if="selectedStock" class="flex items-center gap-2 px-3 py-1.5 bg-primary/10 rounded-lg border border-primary/20 animate-in fade-in slide-in-from-left-2 duration-300">
+            <div class="flex flex-col">
+              <span class="text-sm font-bold text-primary leading-none">{{ selectedStock.name }}</span>
+              <span class="text-[10px] text-primary/60 font-mono mt-0.5">{{ selectedStock.code }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右侧：功能按钮 -->
+        <div class="flex items-center gap-2 border-l border-foreground/10 pl-4">
+          <!-- 分析按钮 -->
           <button 
+            v-if="['dashboard', 'finance', 'market'].includes(activeCategory)"
             @click="startAnalysis"
-            :disabled="isAnalyzing || !analysisSymbol"
+            :disabled="isAnalyzing || !selectedStock"
             class="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:opacity-90 active:scale-95 disabled:opacity-50 disabled:active:scale-100 transition-all shadow-sm"
           >
             <Loader2 v-if="isAnalyzing" class="w-4 h-4 animate-spin" />
             <TrendingUp v-else class="w-4 h-4" />
             开始分析
           </button>
-        </div>
 
-        <button 
-          v-if="activeCategory === 'market'"
-          @click="startFinanceDownload"
-          :disabled="isDownloading || !financeConfig.symbol"
-          class="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:opacity-90 active:scale-95 disabled:opacity-50 disabled:active:scale-100 transition-all shadow-sm"
-        >
-          <Download v-if="!isDownloading" class="w-4 h-4" />
-          <RefreshCw v-else class="w-4 h-4 animate-spin" />
-          {{ isDownloading ? '同步中...' : '开始同步' }}
-        </button>
+          <!-- 财报下载按钮 -->
+          <button 
+            v-if="activeCategory === 'finance'"
+            @click="startFinanceDownload"
+            :disabled="isDownloading || !selectedStock"
+            class="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:opacity-90 active:scale-95 disabled:opacity-50 disabled:active:scale-100 transition-all shadow-sm"
+          >
+            <Download v-if="!isDownloading" class="w-4 h-4" />
+            <RefreshCw v-else class="w-4 h-4 animate-spin" />
+            {{ isDownloading ? '下载中...' : '下载财报' }}
+          </button>
+
+          <!-- 行情导出按钮 -->
+          <button 
+            v-if="activeCategory === 'market'"
+            @click="startHistoryDownload"
+            :disabled="isDownloadingHistory || !selectedStock"
+            class="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:opacity-90 active:scale-95 disabled:opacity-50 disabled:active:scale-100 transition-all shadow-sm"
+          >
+            <Database v-if="!isDownloadingHistory" class="w-4 h-4" />
+            <RefreshCw v-else class="w-4 h-4 animate-spin" />
+            {{ isDownloadingHistory ? '导出中...' : '导出行情' }}
+          </button>
+        </div>
       </div>
     </template>
 
@@ -583,14 +681,23 @@ onUnmounted(() => {
         <!-- 空状态 -->
         <div v-if="!analysisResult" class="flex-1 flex flex-col items-center justify-center text-center max-w-2xl mx-auto">
           <div class="w-20 h-20 bg-primary/10 rounded-3xl flex items-center justify-center mb-6 text-primary">
-            <Activity class="w-10 h-10" v-if="!isAnalyzing" />
-            <Loader2 class="w-10 h-10 animate-spin" v-else />
+            <Activity class="w-10 h-10" v-if="!isAnalyzing && !analysisError" />
+            <Loader2 class="w-10 h-10 animate-spin" v-else-if="isAnalyzing" />
+            <AlertCircle class="w-10 h-10 text-red-500" v-else />
           </div>
           <h2 class="text-2xl font-semibold mb-2">
-            {{ isAnalyzing ? '深度分析中' : '量化分析引擎' }}
+            {{ isAnalyzing ? '深度分析中' : (analysisError ? '分析失败' : '量化分析引擎') }}
           </h2>
           <p class="text-foreground/50 mb-8">
-            {{ isAnalyzing ? analysisStatus : '请输入股票代码并点击开始分析，系统将从波动率、流动性、资金流、基本面及行业相关性维度进行深度扫描。' }}
+            <template v-if="isAnalyzing">
+              {{ analysisStatus }}
+            </template>
+            <template v-else-if="analysisError">
+              <span class="text-red-500">{{ analysisError }}</span>
+            </template>
+            <template v-else>
+              请在顶部搜索框选择标的并点击开始分析，系统将从波动率、流动性、资金流、基本面及行业相关性维度进行深度扫描。
+            </template>
           </p>
         </div>
 
@@ -839,22 +946,6 @@ onUnmounted(() => {
         <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
           <!-- 左侧配置区 -->
           <div class="flex flex-col gap-6">
-            <!-- 标的选择 -->
-            <div class="space-y-3">
-              <label class="text-sm font-semibold text-foreground/70 flex items-center gap-2">
-                <Search class="w-4 h-4" /> 标的选择
-              </label>
-              <div class="relative">
-                <input 
-                  v-model="financeConfig.symbol"
-                  type="text" 
-                  placeholder="输入股票代码或名称 (如: 000001 或 平安银行)"
-                  class="w-full bg-background border border-thin rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
-                />
-              </div>
-              <p class="text-[11px] text-foreground/40 px-1">支持代码和名称模糊搜索匹配</p>
-            </div>
-
             <!-- 报表类型 -->
             <div class="space-y-3">
               <label class="text-sm font-semibold text-foreground/70 flex items-center gap-2">
@@ -912,10 +1003,19 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+
+            <!-- 选中的标的信息提示 -->
+            <div v-if="!selectedStock" class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-start gap-3">
+              <AlertCircle class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+              <div>
+                <div class="text-sm font-bold text-amber-600 mb-0.5">未选择标的</div>
+                <div class="text-xs text-amber-600/70">请在顶部搜索框输入并选择一个股票标的以开始下载任务。</div>
+              </div>
+            </div>
           </div>
 
           <!-- 右侧：本地已下载栏目 -->
-          <div class="flex flex-col bg-foreground/[0.02] border border-thin rounded-2xl overflow-hidden min-h-[500px]">
+        <div class="flex flex-col bg-foreground/[0.02] border border-thin rounded-2xl overflow-hidden min-h-[500px]">
             <div class="p-4 border-b border-thin flex items-center justify-between shrink-0 bg-background/50 backdrop-blur-sm">
               <div class="flex items-center gap-2">
                 <Database class="w-4 h-4 text-primary" />
@@ -973,7 +1073,12 @@ onUnmounted(() => {
                   </div>
                   <div class="flex items-center gap-1 shrink-0">
                     <button 
-                      @click="financeConfig.symbol = item.name.split('_')[0]"
+                      @click="() => {
+                        const code = item.name.split('_')[0];
+                        const stock = marketStore.stocks.find(s => s.code === code);
+                        if (stock) selectStock(stock);
+                        else financeConfig.symbol = code; // Fallback
+                      }"
                       class="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-primary/10 rounded-md text-primary transition-all"
                       title="快速选择"
                     >
@@ -1051,19 +1156,6 @@ onUnmounted(() => {
           <!-- 左侧：导出配置 -->
           <div class="w-96 flex flex-col gap-6">
             <div class="bg-card border border-thin rounded-3xl p-6 space-y-6 shadow-sm">
-              <!-- 股票代码 -->
-              <div class="space-y-3">
-                <label class="text-sm font-semibold text-foreground/70 flex items-center gap-2 px-1">
-                  <Search class="w-4 h-4" /> 目标标的
-                </label>
-                <input 
-                  v-model="marketHistoryConfig.symbol"
-                  type="text" 
-                  placeholder="输入股票代码 (如 000001)"
-                  class="w-full px-4 py-3 bg-foreground/5 border border-thin rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all font-mono"
-                />
-              </div>
-
               <!-- 时间范围预设 -->
               <div class="space-y-3">
                 <label class="text-sm font-semibold text-foreground/70 flex items-center gap-2 px-1">
@@ -1168,11 +1260,20 @@ onUnmounted(() => {
                 </label>
               </div>
 
+              <!-- 选中的标的信息提示 -->
+              <div v-if="!selectedStock" class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-start gap-3">
+                <AlertCircle class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                <div>
+                  <div class="text-sm font-bold text-amber-600 mb-0.5">未选择标的</div>
+                  <div class="text-xs text-amber-600/70">请在顶部搜索框输入并选择一个股票标的以开始导出任务。</div>
+                </div>
+              </div>
+
               <!-- 操作按钮 -->
               <div class="pt-4">
                 <button 
                   @click="startHistoryDownload"
-                  :disabled="!marketHistoryConfig.symbol || isDownloadingHistory"
+                  :disabled="!selectedStock || isDownloadingHistory"
                   class="w-full py-4 bg-primary text-primary-foreground rounded-2xl font-bold shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:scale-100 transition-all flex items-center justify-center gap-3"
                 >
                   <Download v-if="!isDownloadingHistory" class="w-5 h-5" />

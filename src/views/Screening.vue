@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import SidebarLayout from '../components/SidebarLayout.vue'
 import { marketStore } from '../store/market'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { 
   Filter, 
   Search, 
@@ -20,13 +22,85 @@ import {
   Clock,
   Trash2,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  Zap,
+  Activity,
+  Plus,
+  ArrowUp
 } from 'lucide-vue-next'
 
 const router = useRouter()
 const activeCategory = ref('strategy')
 const selectedStrategy = ref<string | null>(null)
 const isScreening = ref(false)
+const screeningProgress = ref(0)
+const sidecarResults = ref<any[]>([])
+let unlistenScreening: any = null
+
+const searchScrollContainer = ref<HTMLElement | null>(null)
+const showBackTop = ref(false)
+const resultsHeaderRef = ref<HTMLElement | null>(null)
+
+// 监听滚动显示回到顶部按钮
+const handleScroll = (e: Event) => {
+  const target = e.target as HTMLElement
+  showBackTop.value = target.scrollTop > 400
+}
+
+onMounted(async () => {
+  // 查找 SidebarLayout 中的滚动容器
+  const scrollContainer = document.querySelector('main .custom-scrollbar')
+  if (scrollContainer) {
+    scrollContainer.addEventListener('scroll', handleScroll)
+    searchScrollContainer.value = scrollContainer as HTMLElement
+  }
+})
+
+// 配置常量
+const availableFilterOptions = [
+  // 动能指标
+  { key: 'price', label: '最新价', unit: '元', group: 'momentum' },
+  { key: 'change', label: '今日涨跌', unit: '%', group: 'momentum' },
+  { key: 'speed', label: '涨速', unit: '', group: 'momentum' },
+  { key: 'volume_ratio', label: '量比', unit: '', group: 'momentum' },
+  
+  // 量能分析
+  { key: 'volume', label: '成交量', unit: '', group: 'volume' },
+  { key: 'amount', label: '成交额', unit: '', group: 'volume' },
+  { key: 'turnover_actual', label: '换手(实)', unit: '%', group: 'volume' },
+  { key: 'turnover', label: '换手率', unit: '%', group: 'volume' },
+  { key: 'limit_up', label: '涨停', unit: '元', group: 'volume' },
+  { key: 'limit_down', label: '跌停', unit: '元', group: 'volume' },
+  
+  // 空间位置
+  { key: 'amplitude', label: '振幅', unit: '%', group: 'space' },
+  { key: 'high', label: '最高', unit: '元', group: 'space' },
+  { key: 'low', label: '最低', unit: '元', group: 'space' },
+  { key: 'open', label: '今开', unit: '元', group: 'space' },
+  { key: 'prevClose', label: '昨收', unit: '元', group: 'space' },
+  
+  // 资金流向
+  { key: 'main_inflow', label: '主力净流', unit: '万元', group: 'flow', factor: 10000 },
+  { key: 'main_inflow_ratio', label: '主力占比', unit: '%', group: 'flow' },
+  { key: 'change_ytd', label: '年内涨跌', unit: '%', group: 'flow' },
+  
+  // 基本面
+  { key: 'market_cap', label: '总市值', unit: '亿元', group: 'fundamental', factor: 100000000 },
+  { key: 'circulating_market_cap', label: '流通市值', unit: '亿元', group: 'fundamental', factor: 100000000 },
+  { key: 'total_shares', label: '总股本', unit: '', group: 'fundamental' },
+  { key: 'circulating_shares', label: '流通股', unit: '', group: 'fundamental' },
+  { key: 'pe_static', label: '市盈(静)', unit: '', group: 'fundamental' },
+  { key: 'pe_ttm', label: '市盈(TTM)', unit: '', group: 'fundamental' },
+  { key: 'pb', label: '市净率', unit: '', group: 'fundamental' }
+]
+
+const groupMetadata: Record<string, { label: string, color: string, borderColor: string, bgColor: string }> = {
+  'momentum': { label: '动能指标', color: 'text-orange-600', borderColor: 'border-orange-500/30', bgColor: 'bg-orange-500/5' },
+  'volume': { label: '量能分析', color: 'text-blue-600', borderColor: 'border-blue-500/30', bgColor: 'bg-blue-500/5' },
+  'space': { label: '空间位置', color: 'text-purple-600', borderColor: 'border-purple-500/30', bgColor: 'bg-purple-500/5' },
+  'flow': { label: '资金流向', color: 'text-cyan-600', borderColor: 'border-cyan-500/30', bgColor: 'bg-cyan-500/5' },
+  'fundamental': { label: '基本面', color: 'text-emerald-600', borderColor: 'border-emerald-500/30', bgColor: 'bg-emerald-500/5' }
+}
 
 // 策略诊断逻辑
 const strategyDiagnostics = computed(() => {
@@ -66,15 +140,12 @@ const strategyDiagnostics = computed(() => {
 })
 
 // 条件搜索状态
-const searchFilters = ref({
-  price: { min: '', max: '' },
-  change: { min: '', max: '' },
-  pe_ttm: { min: '', max: '' },
-  pb: { min: '', max: '' },
-  market_cap: { min: '', max: '' }, // 单位：亿
-  turnover: { min: '', max: '' },
-  main_inflow: { min: '', max: '' } // 单位：万
-})
+const searchFilters = ref(
+  availableFilterOptions.reduce((acc, opt) => {
+    acc[opt.key] = { min: '', max: '' }
+    return acc
+  }, {} as any)
+)
 
 const isSearching = ref(false)
 const showSearchResults = ref(false)
@@ -83,7 +154,7 @@ const showSearchResults = ref(false)
 const searchHistory = ref<any[]>([])
 const HISTORY_KEY = 'cranepoint_search_history'
 
-onMounted(() => {
+onMounted(async () => {
   const savedHistory = localStorage.getItem(HISTORY_KEY)
   if (savedHistory) {
     try {
@@ -91,6 +162,25 @@ onMounted(() => {
     } catch (e) {
       console.error('Failed to parse search history:', e)
     }
+  }
+
+  // 监听筛选进度
+  try {
+    unlistenScreening = await listen('screening-progress', (event: any) => {
+      // 逻辑保护：进度条只增不减，防止多个后台进程（如果意外存在）干扰
+      if (event.payload > screeningProgress.value) {
+        screeningProgress.value = event.payload
+      }
+    })
+  } catch (e) {
+    console.warn('Tauri events not available')
+  }
+})
+
+onUnmounted(() => {
+  if (unlistenScreening) unlistenScreening()
+  if (searchScrollContainer.value) {
+    searchScrollContainer.value.removeEventListener('scroll', handleScroll)
   }
 })
 
@@ -132,20 +222,45 @@ const deleteHistoryItem = (id: number) => {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(searchHistory.value))
 }
 
+const executeSearch = () => {
+  isSearching.value = true
+  setTimeout(() => {
+    showSearchResults.value = true
+    isSearching.value = false
+    saveToHistory(searchFilters.value)
+    
+    // 自动滑动到结果区
+    setTimeout(() => {
+      if (resultsHeaderRef.value && searchScrollContainer.value) {
+        resultsHeaderRef.value.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      }
+    }, 100)
+  }, 600)
+}
+
+const scrollToTop = () => {
+  if (searchScrollContainer.value) {
+    searchScrollContainer.value.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+}
+
 const applyHistory = (historyItem: any) => {
   searchFilters.value = JSON.parse(JSON.stringify(historyItem.filters))
   activeCategory.value = 'search'
   executeSearch()
 }
 
-const filterLabels: Record<string, string> = {
-  price: '现价',
-  change: '涨跌',
-  pe_ttm: 'PE',
-  pb: 'PB',
-  market_cap: '市值',
-  turnover: '换手',
-  main_inflow: '流向'
+const resetFilters = () => {
+  availableFilterOptions.forEach(opt => {
+    if (searchFilters.value[opt.key as keyof typeof searchFilters.value]) {
+      searchFilters.value[opt.key as keyof typeof searchFilters.value] = { min: '', max: '' }
+    }
+  })
+  showSearchResults.value = false
+}
+
+const getFilterLabel = (key: string) => {
+  return availableFilterOptions.find(o => o.key === key)?.label || key
 }
 
 const menuItems = [
@@ -197,10 +312,50 @@ const strategies = [
       '中大型市值：总市值 > 200 亿',
       '破净边际：PB < 1.2'
     ]
+  },
+  {
+    id: 'macd_cross',
+    name: 'MACD 零下金叉 (全市场)',
+    description: '寻找处于零轴下方的 MACD 金叉，捕捉超跌反弹或波段起涨点。',
+    icon: Zap,
+    color: 'text-purple-500',
+    bgColor: 'bg-purple-500/10',
+    criteria: [
+      '核心信号：零下金叉 (DIFF/DEA < 0)',
+      '判定条件：昨日 DIFF <= DEA 且今日 DIFF > DEA',
+      '范围限制：排除今日跌幅超过 5% 的标的'
+    ]
   }
 ]
 
 // 自定义搜索筛选逻辑
+const columnFilters = computed(() => {
+  const total = availableFilterOptions.length
+  
+  // 尽量均匀分布到 3 列
+  const perCol = Math.ceil(total / 3)
+  const cols: any[][] = [[], [], []]
+  
+  availableFilterOptions.forEach((opt, index) => {
+    const colIndex = Math.min(Math.floor(index / perCol), 2)
+    cols[colIndex].push(opt)
+  })
+  
+  // 在每一列内按连续的分组进行包装
+  return cols.map(col => {
+    const groupedInCol: { group: string, items: any[] }[] = []
+    col.forEach(item => {
+      const lastGroup = groupedInCol[groupedInCol.length - 1]
+      if (lastGroup && lastGroup.group === item.group) {
+        lastGroup.items.push(item)
+      } else {
+        groupedInCol.push({ group: item.group, items: [item] })
+      }
+    })
+    return groupedInCol
+  })
+})
+
 const customSearchResults = computed(() => {
   const allStocks = marketStore.stocks
   return allStocks.filter(s => {
@@ -210,39 +365,17 @@ const customSearchResults = computed(() => {
       return val >= min && val <= max
     }
 
-    return (
-      checkRange(s.price, searchFilters.value.price) &&
-      checkRange(s.change, searchFilters.value.change) &&
-      checkRange(s.pe_ttm, searchFilters.value.pe_ttm) &&
-      checkRange(s.pb, searchFilters.value.pb) &&
-      checkRange(s.market_cap, searchFilters.value.market_cap, 100000000) &&
-      checkRange(s.turnover, searchFilters.value.turnover) &&
-      checkRange(s.main_inflow, searchFilters.value.main_inflow, 10000)
-    )
+    // 仅对填了数值的项进行过滤
+    return availableFilterOptions.every(opt => {
+      const range = searchFilters.value[opt.key as keyof typeof searchFilters.value]
+      if (range.min === '' && range.max === '') return true // 未填写的项跳过过滤
+      
+      const factor = opt.factor || 1
+      const val = s[opt.key as keyof typeof s]
+      return checkRange(Number(val), range, factor)
+    })
   })
 })
-
-const executeSearch = () => {
-  isSearching.value = true
-  setTimeout(() => {
-    showSearchResults.value = true
-    isSearching.value = false
-    saveToHistory(searchFilters.value)
-  }, 600)
-}
-
-const resetFilters = () => {
-  searchFilters.value = {
-    price: { min: '', max: '' },
-    change: { min: '', max: '' },
-    pe_ttm: { min: '', max: '' },
-    pb: { min: '', max: '' },
-    market_cap: { min: '', max: '' },
-    turnover: { min: '', max: '' },
-    main_inflow: { min: '', max: '' }
-  }
-  showSearchResults.value = false
-}
 
 // 策略筛选结果
 const screeningResults = computed(() => {
@@ -291,18 +424,56 @@ const screeningResults = computed(() => {
              pb > 0 && pb < 1.2
     })
   }
+
+  if (selectedStrategy.value === 'macd_cross') {
+    return sidecarResults.value
+  }
   
   return []
 })
 
-const selectStrategy = (id: string) => {
+const selectStrategy = async (id: string) => {
+  if (isScreening.value) return // 并发保护：如果正在筛选，拒绝新的请求
+  
   isScreening.value = true
   selectedStrategy.value = null // 先清空，为了触发动画
+  screeningProgress.value = 0
+  sidecarResults.value = []
   
-  setTimeout(() => {
-    selectedStrategy.value = id
-    isScreening.value = false
-  }, 800)
+  if (id === 'macd_cross') {
+    // 数据完整性检查
+    if (!marketStore.stocks || marketStore.stocks.length === 0) {
+      alert('请先在“行情中心”刷新并获取市场实时数据')
+      isScreening.value = false
+      return
+    }
+
+    try {
+      selectedStrategy.value = id // 立即切换，即使还在加载
+      // 如果是 MACD 策略，调用 Sidecar
+      const results = await invoke('run_strategy_screening', {
+        stocks: marketStore.stocks
+      })
+      const parsedResults = JSON.parse(results as string)
+      sidecarResults.value = parsedResults
+
+      if (parsedResults.length === 0) {
+        // 可以选择提示用户没有符合条件的股票
+        console.log('No stocks met the criteria.')
+      }
+    } catch (e) {
+      console.error('Screening failed:', e)
+      alert(`筛选失败: ${e}`)
+    } finally {
+      isScreening.value = false
+    }
+  } else {
+    // 其他本地策略
+    setTimeout(() => {
+      selectedStrategy.value = id
+      isScreening.value = false
+    }, 800)
+  }
 }
 
 const goToAnalysis = (code: string) => {
@@ -334,182 +505,186 @@ const formatNumber = (val: number | undefined | null, decimals: number = 2) => {
 </script>
 
 <template>
-  <SidebarLayout
-    title="股票筛选"
-    subtitle="多维因子选股，锁定核心标的"
-    :icon="Filter"
-    :menuItems="menuItems"
-    v-model:activeId="activeCategory"
-  >
-    <template #default="{ activeId }">
-      <!-- 策略选股主视图 -->
-      <div v-if="activeId === 'strategy'" class="h-full flex flex-col p-8 overflow-hidden relative">
-        <!-- 加载蒙层 -->
-        <div v-if="isScreening" class="absolute inset-0 z-50 bg-background/60 backdrop-blur-sm flex flex-col items-center justify-center animate-in fade-in duration-300">
-          <div class="w-16 h-16 bg-primary/10 rounded-3xl flex items-center justify-center mb-4 text-primary">
-            <Loader2 class="w-8 h-8 animate-spin" />
-          </div>
-          <p class="text-sm font-medium text-foreground/60">正在基于实时行情快照进行多维筛选...</p>
-        </div>
-
-        <div v-if="!selectedStrategy && !isScreening" class="flex-none mb-12 text-center max-w-2xl mx-auto pt-10">
-          <div class="w-20 h-20 bg-primary/10 rounded-3xl flex items-center justify-center mb-6 text-primary mx-auto">
-            <Target class="w-10 h-10" />
-          </div>
-          <h2 class="text-3xl font-bold mb-4">策略选股中心</h2>
-          <p class="text-foreground/50 text-lg">
-            基于多维量化因子库，我们为您预设了以下经典投资策略。点击下方卡片即可开始在当前市场快照中进行实时筛选。
-          </p>
-        </div>
-
-        <div v-if="!selectedStrategy && !isScreening" class="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-6xl mx-auto w-full">
-          <div 
-            v-for="s in strategies" 
-            :key="s.id"
-            @click="selectStrategy(s.id)"
-            class="group bg-card border border-thin rounded-3xl p-8 hover:border-primary/50 hover:shadow-xl hover:shadow-primary/5 transition-all cursor-pointer flex flex-col relative overflow-hidden"
-          >
-            <div :class="['absolute -right-4 -top-4 w-24 h-24 rounded-full opacity-5 transition-transform group-hover:scale-150', s.bgColor]"></div>
-            <div :class="['w-14 h-14 rounded-2xl flex items-center justify-center mb-6 transition-transform group-hover:scale-110 shadow-sm', s.bgColor, s.color]">
-              <component :is="s.icon" class="w-7 h-7" />
-            </div>
-            <h3 class="text-xl font-bold mb-3 group-hover:text-primary transition-colors">{{ s.name }}</h3>
-            <p class="text-sm text-foreground/50 leading-relaxed mb-8 flex-1">{{ s.description }}</p>
-            <div class="space-y-3 mb-8">
-              <div v-for="(c, idx) in s.criteria" :key="idx" class="flex items-center gap-2 text-[13px] text-foreground/60 font-medium">
-                <div class="w-1.5 h-1.5 rounded-full bg-primary/30"></div>
-                {{ c }}
+  <div class="h-full">
+    <SidebarLayout
+      title="股票筛选"
+      subtitle="多维因子选股，锁定核心标的"
+      :icon="Filter"
+      :menuItems="menuItems"
+      v-model:activeId="activeCategory"
+    >
+      <template #default="{ activeId }">
+        <!-- 策略选股主视图 -->
+        <div v-if="activeId === 'strategy'" class="h-full flex flex-col p-6 overflow-hidden">
+          <div class="flex-1 flex gap-6 min-h-0">
+            <!-- 左侧策略列表 -->
+            <div class="w-80 flex-none flex flex-col gap-4 overflow-y-auto custom-scrollbar pr-2">
+              <div class="flex-none px-2 py-4">
+                <h2 class="text-xl font-bold flex items-center gap-2">
+                  <Target class="w-5 h-5 text-primary" />
+                  策略中心
+                </h2>
+                <p class="text-xs text-foreground/40 mt-1">点击切换量化投资策略</p>
               </div>
-            </div>
-            <button class="w-full py-3 bg-foreground/[0.03] border border-thin rounded-xl text-sm font-bold group-hover:bg-primary group-hover:text-primary-foreground group-hover:border-primary transition-all flex items-center justify-center gap-2 shadow-sm">
-              开始筛选 <ChevronRight class="w-4 h-4" />
-            </button>
-          </div>
-        </div>
+              
+              <div class="flex flex-col gap-2">
+                <button 
+                  v-for="s in strategies" 
+                  :key="s.id"
+                  @click="selectStrategy(s.id)"
+                  class="group w-full text-left p-4 rounded-2xl border border-thin transition-all relative overflow-hidden"
+                  :class="[
+                    selectedStrategy === s.id 
+                      ? 'bg-primary/5 border-primary/30 shadow-sm' 
+                      : 'bg-card hover:bg-foreground/[0.02] hover:border-foreground/10'
+                  ]"
+                >
+                  <!-- 激活状态指示条 -->
+                  <div 
+                    v-if="selectedStrategy === s.id" 
+                    class="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full"
+                  ></div>
 
-        <div v-else-if="selectedStrategy && !isScreening" class="flex-1 flex flex-col min-h-0 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div class="flex-none flex items-center justify-between mb-6">
-            <div class="flex items-center gap-4">
-              <button @click="selectedStrategy = null" class="p-2 hover:bg-foreground/5 rounded-xl transition-colors text-foreground/40 hover:text-foreground">
-                <ChevronRight class="w-6 h-6 rotate-180" />
-              </button>
-              <div>
-                <div class="flex items-center gap-2 mb-1">
-                  <h3 class="text-2xl font-bold">{{ strategies.find(s => s.id === selectedStrategy)?.name }}</h3>
-                  <span class="px-2.5 py-0.5 bg-primary/10 text-primary text-[10px] font-bold rounded-full uppercase tracking-wider">筛选结果: {{ screeningResults.length }} 只</span>
-                </div>
-                <p class="text-sm text-foreground/40">基于当前市场快照数据，为您匹配符合策略条件的优质标的</p>
-              </div>
-            </div>
-            <div class="flex items-center gap-3">
-              <div class="px-4 py-2 bg-amber-500/10 text-amber-600 rounded-xl flex items-center gap-2 text-xs font-medium border border-amber-500/20">
-                <Info class="w-4 h-4" />
-                所有计算基于 <b>{{ marketStore.stocks.length }}</b> 只全量 A 股
-              </div>
-            </div>
-          </div>
-
-          <!-- 结果表格 -->
-          <div class="flex-1 bg-card border border-thin rounded-3xl overflow-hidden shadow-sm flex flex-col">
-            <div class="flex-1 overflow-auto custom-scrollbar">
-              <table class="w-full border-collapse text-left">
-                <thead class="sticky top-0 z-10 bg-card/80 backdrop-blur-md border-b border-thin">
-                  <tr>
-                    <th class="px-6 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider">股票名称</th>
-                    <th class="px-4 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-right">现价</th>
-                    <th class="px-4 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-right">涨跌幅</th>
-                    <th class="px-4 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-right">PE(TTM)</th>
-                    <th class="px-4 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-right">PB</th>
-                    <th class="px-4 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-right">总市值</th>
-                    <th class="px-4 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-right">主力净流</th>
-                    <th class="px-6 py-4 text-[11px] font-bold text-foreground/40 uppercase tracking-wider text-center">操作</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-thin">
-                  <tr v-for="stock in screeningResults" :key="stock.code" class="group hover:bg-foreground/[0.02] transition-colors">
-                    <td class="px-6 py-4">
-                      <div class="flex flex-col">
-                        <span class="font-bold text-sm">{{ stock.name }}</span>
-                        <span class="text-[10px] font-mono text-foreground/30 group-hover:text-primary/50 transition-colors">{{ stock.code }}</span>
-                      </div>
-                    </td>
-                    <td class="px-4 py-4 text-right font-mono text-sm">{{ formatNumber(stock.price) }}</td>
-                    <td class="px-4 py-4 text-right font-mono text-sm">
-                      <span :class="stock.change > 0 ? 'text-red-500' : stock.change < 0 ? 'text-green-500' : ''">
-                        {{ stock.change > 0 ? '+' : '' }}{{ formatNumber(stock.change) }}%
-                      </span>
-                    </td>
-                    <td class="px-4 py-4 text-right font-mono text-sm text-foreground/60">{{ formatNumber(stock.pe_ttm) }}</td>
-                    <td class="px-4 py-4 text-right font-mono text-sm text-foreground/60">{{ formatNumber(stock.pb) }}</td>
-                    <td class="px-4 py-4 text-right font-mono text-sm text-foreground/60">{{ formatAmount(stock.market_cap) }}</td>
-                    <td class="px-4 py-4 text-right font-mono text-sm">
-                      <span :class="stock.main_inflow > 0 ? 'text-red-500' : 'text-green-500'">{{ formatAmount(stock.main_inflow) }}</span>
-                    </td>
-                    <td class="px-6 py-4">
-                      <div class="flex items-center justify-center gap-2">
-                        <button 
-                          @click="goToAnalysis(stock.code)"
-                          class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20" 
-                          title="个股分析"
-                        >
-                          <TrendingUp class="w-4 h-4" />
-                        </button>
-                        <button 
-                          @click="goToMarket(stock.code)"
-                          class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20" 
-                          title="查看行情"
-                        >
-                          <ExternalLink class="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-if="screeningResults.length === 0" class="py-24 flex flex-col items-center justify-center">
-                <div class="w-16 h-16 bg-foreground/5 rounded-full flex items-center justify-center mb-6">
-                  <ShieldCheck class="w-8 h-8 text-foreground/10" />
-                </div>
-                <h3 class="text-lg font-medium text-foreground/40 mb-2">在当前市场快照中未找到符合该策略的标的</h3>
-                <p class="text-sm text-foreground/20 mb-8">请尝试更新市场快照或选择其他策略</p>
-                
-                <!-- 筛选诊断 -->
-                <div v-if="strategyDiagnostics" class="w-full max-w-md bg-foreground/[0.02] rounded-2xl p-6 border border-thin">
-                  <div class="flex items-center gap-2 mb-4">
-                    <AlertCircle class="w-4 h-4 text-primary" />
-                    <span class="text-sm font-medium">策略条件诊断 (通过数量 / 总数 {{ strategyDiagnostics.total }})</span>
-                  </div>
-                  <div class="space-y-3">
-                    <div v-for="cond in strategyDiagnostics.conditions" :key="cond.label" class="flex items-center justify-between">
-                      <span class="text-xs text-foreground/60">{{ cond.label }}</span>
-                      <div class="flex items-center gap-3">
-                        <div class="w-32 h-1.5 bg-foreground/5 rounded-full overflow-hidden">
-                          <div 
-                            class="h-full bg-primary transition-all duration-500"
-                            :style="{ width: `${(cond.count / strategyDiagnostics.total) * 100}%` }"
-                          ></div>
-                        </div>
-                        <span class="text-[11px] font-mono w-12 text-right" :class="cond.count === 0 ? 'text-red-500' : 'text-foreground/40'">
-                          {{ cond.count }}
-                        </span>
-                      </div>
+                  <div class="flex items-start gap-3">
+                    <div :class="['w-10 h-10 rounded-xl flex items-center justify-center flex-none shadow-sm', s.bgColor, s.color]">
+                      <component :is="s.icon" class="w-5 h-5" />
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <h3 class="font-bold text-sm mb-1 truncate" :class="{ 'text-primary': selectedStrategy === s.id }">{{ s.name }}</h3>
+                      <p class="text-[11px] text-foreground/40 leading-relaxed line-clamp-2">{{ s.description }}</p>
                     </div>
                   </div>
-                  <div class="mt-6 pt-4 border-t border-thin">
-                    <p class="text-[11px] text-foreground/30 leading-relaxed">
-                      提示：巴菲特策略对“大市值”和“资金流入”要求较高。若今日市场整体走势较弱，主力资金可能普遍呈现流出状态，导致无匹配项。
-                    </p>
+
+                  <!-- 策略条件简述 - 仅在选中时显示更多细节 -->
+                  <div v-if="selectedStrategy === s.id" class="mt-4 pt-4 border-t border-primary/10 space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                    <div v-for="(c, idx) in s.criteria" :key="idx" class="flex items-center gap-2 text-[10px] text-foreground/60 font-medium">
+                      <div class="w-1 h-1 rounded-full bg-primary/30"></div>
+                      {{ c }}
+                    </div>
                   </div>
+                </button>
+              </div>
+            </div>
+
+            <!-- 右侧显示框 -->
+            <div class="flex-1 bg-card border border-thin rounded-[2rem] shadow-sm flex flex-col overflow-hidden relative">
+              <!-- 加载蒙层 -->
+              <div v-if="isScreening" class="absolute inset-0 z-50 bg-background/60 backdrop-blur-sm flex flex-col items-center justify-center animate-in fade-in duration-300">
+                <div class="w-16 h-16 bg-primary/10 rounded-3xl flex items-center justify-center mb-4 text-primary relative overflow-hidden">
+                  <Loader2 class="w-8 h-8 animate-spin z-10" />
+                  <!-- 进度条背景 -->
+                  <div v-if="screeningProgress > 0" class="absolute inset-0 bg-primary/20 transition-all duration-300" :style="{ height: screeningProgress + '%' }"></div>
+                </div>
+                <p class="text-sm font-medium text-foreground/60">{{ screeningProgress < 10 ? '正在初始化并发引擎...' : '正在进行全市场实时扫描...' }}</p>
+                <div class="flex flex-col items-center gap-1 mt-2">
+                  <p v-if="screeningProgress > 0" class="text-[10px] text-primary font-mono font-bold">{{ screeningProgress }}%</p>
+                  <p class="text-[10px] text-foreground/30">已开启 30 线程并发加速</p>
                 </div>
               </div>
+
+              <div v-if="selectedStrategy" class="flex-1 flex flex-col min-h-0">
+                <!-- 顶部统计栏 -->
+                <div class="flex-none px-8 py-6 border-b border-thin bg-foreground/[0.01] flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <div :class="['w-8 h-8 rounded-lg flex items-center justify-center', strategies.find(s => s.id === selectedStrategy)?.bgColor, strategies.find(s => s.id === selectedStrategy)?.color]">
+                      <component :is="strategies.find(s => s.id === selectedStrategy)?.icon" class="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 class="font-bold text-lg">{{ strategies.find(s => s.id === selectedStrategy)?.name }}</h3>
+                      <p class="text-xs text-foreground/40">筛选结果: <span class="text-primary font-bold">{{ screeningResults.length }}</span> 只</p>
+                    </div>
+                  </div>
+                  <div class="px-4 py-2 bg-amber-500/5 text-amber-600 rounded-xl flex items-center gap-2 text-xs font-medium border border-amber-500/10">
+                    <Info class="w-3.5 h-3.5" />
+                    基于 <b>{{ marketStore.stocks.length }}</b> 基于实时行情快照
+                  </div>
+                </div>
+
+              <!-- 结果表格 -->
+              <div class="flex-1 overflow-auto custom-scrollbar">
+                <table class="w-full border-collapse text-left">
+                  <thead class="sticky top-0 z-10 bg-card/80 backdrop-blur-md border-b border-thin">
+                    <tr>
+                      <th class="px-8 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest">股票名称</th>
+                      <th class="px-4 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-right">最新价</th>
+                      <th class="px-4 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-right">涨跌幅</th>
+                      <th class="px-4 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-right">PE(TTM)</th>
+                      <th class="px-4 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-right">量比/换手</th>
+                      <th class="px-4 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-right">总市值</th>
+                      <th class="px-4 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-center">信号状态</th>
+                      <th class="px-8 py-4 text-[10px] font-bold text-foreground/30 uppercase tracking-widest text-center">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-thin">
+                    <tr v-for="stock in screeningResults" :key="stock.code" class="group hover:bg-foreground/[0.02] transition-colors">
+                      <td class="px-8 py-4">
+                        <div class="flex flex-col">
+                          <span class="font-bold text-sm">{{ stock.name }}</span>
+                          <span class="text-[10px] font-mono text-foreground/20 group-hover:text-primary/50 transition-colors">{{ stock.code }}</span>
+                        </div>
+                      </td>
+                      <td class="px-4 py-4 text-right font-mono text-sm">{{ formatNumber(stock.price) }}</td>
+                      <td class="px-4 py-4 text-right font-mono text-sm">
+                        <span :class="stock.change > 0 ? 'text-red-500' : stock.change < 0 ? 'text-green-500' : ''">
+                          {{ stock.change > 0 ? '+' : '' }}{{ formatNumber(stock.change) }}%
+                        </span>
+                      </td>
+                      <td class="px-4 py-4 text-right font-mono text-sm text-foreground/50">{{ formatNumber(stock.pe_ttm) }}</td>
+                      <td class="px-4 py-4 text-right font-mono text-sm text-foreground/50">
+                        <div class="flex flex-col items-end">
+                          <span>{{ formatNumber(stock.volume_ratio) }}</span>
+                          <span class="text-[10px] text-foreground/30">{{ formatNumber(stock.turnover) }}%</span>
+                        </div>
+                      </td>
+                      <td class="px-4 py-4 text-right font-mono text-sm text-foreground/50">{{ formatAmount(stock.market_cap) }}</td>
+                      <td class="px-4 py-4 text-center">
+                        <div class="flex flex-col items-center gap-1">
+                          <span v-if="stock.macd_status" class="px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500 text-[10px] font-bold">
+                            零下金叉
+                          </span>
+                          <span v-if="stock.has_divergence" class="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 text-[10px] font-bold">
+                            底背离
+                          </span>
+                          <span v-if="!stock.macd_status && !stock.has_divergence" class="text-foreground/20 text-[10px]">-</span>
+                        </div>
+                      </td>
+                      <td class="px-8 py-4">
+                        <div class="flex items-center justify-center gap-2">
+                          <button @click="goToAnalysis(stock.code)" class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20" title="个股分析"><TrendingUp class="w-4 h-4" /></button>
+                          <button @click="goToMarket(stock.code)" class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20" title="查看行情"><ExternalLink class="w-4 h-4" /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-if="screeningResults.length === 0" class="py-32 flex flex-col items-center justify-center">
+                  <div class="w-20 h-20 bg-foreground/[0.03] rounded-full flex items-center justify-center mb-6">
+                    <ShieldCheck class="w-10 h-10 text-foreground/10" />
+                  </div>
+                  <h3 class="text-lg font-medium text-foreground/40 mb-2">未找到符合该策略的标的</h3>
+                  <p class="text-sm text-foreground/20">请尝试更新市场快照或选择其他策略</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- 未选择策略时的空状态 -->
+            <div v-else class="flex-1 flex flex-col items-center justify-center p-12 text-center">
+              <div class="w-24 h-24 bg-primary/5 rounded-[2.5rem] flex items-center justify-center mb-8 text-primary/20">
+                <Target class="w-12 h-12" />
+              </div>
+              <h3 class="text-2xl font-bold mb-4 text-foreground/80">欢迎来到策略选股中心</h3>
+              <p class="text-foreground/40 max-w-md mx-auto leading-relaxed">
+                请从左侧列表中选择一个量化投资策略，系统将立即基于全量实时 A 股行情为您进行多维因子筛选。
+              </p>
             </div>
           </div>
         </div>
       </div>
 
       <!-- 条件搜索视图 -->
-      <div v-else-if="activeId === 'search'" class="h-full flex flex-col p-8 overflow-hidden">
-        <div class="flex-none mb-8 flex items-center justify-between">
+      <div v-else-if="activeId === 'search'" class="flex flex-col gap-8">
+        <!-- 顶部标题与操作栏 -->
+        <div class="flex items-center justify-between">
           <div class="flex items-center gap-4">
             <div class="p-3 bg-primary/10 rounded-2xl text-primary">
               <Search class="w-6 h-6" />
@@ -538,157 +713,120 @@ const formatNumber = (val: number | undefined | null, decimals: number = 2) => {
           </div>
         </div>
 
-        <div class="flex-1 flex flex-col min-h-0 gap-8">
-          <!-- 筛选配置区 -->
-          <div class="flex-none bg-card border border-thin rounded-3xl p-8 shadow-sm">
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-x-12 gap-y-8">
-              <!-- 价格范围 -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 现价范围 (元)
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.price.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.price.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
+        <!-- 筛选配置区 -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+          <div v-for="(colGroups, colIdx) in columnFilters" :key="colIdx" class="space-y-6">
+            <div 
+              v-for="groupData in colGroups" 
+              :key="groupData.group + colIdx"
+              class="relative border-2 border-dashed rounded-2xl p-4 transition-all duration-300"
+              :class="groupMetadata[groupData.group].borderColor + ' ' + groupMetadata[groupData.group].bgColor"
+            >
+              <!-- 组名标签 -->
+              <div 
+                class="absolute -top-3 left-4 px-2 bg-background text-[10px] font-bold uppercase tracking-widest"
+                :class="groupMetadata[groupData.group].color"
+              >
+                {{ groupMetadata[groupData.group].label }}
               </div>
-              <!-- 涨跌幅 -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 今日涨跌 (%)
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.change.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.change.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
-              </div>
-              <!-- PE(TTM) -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 市盈率 PE(TTM)
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.pe_ttm.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.pe_ttm.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
-              </div>
-              <!-- PB -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 市净率 PB
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.pb.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.pb.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
-              </div>
-              <!-- 总市值 -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 总市值 (亿元)
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.market_cap.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.market_cap.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
-              </div>
-              <!-- 换手率 -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 换手率 (%)
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.turnover.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.turnover.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
-              </div>
-              <!-- 主力净流 -->
-              <div class="space-y-3">
-                <label class="text-xs font-bold text-foreground/40 uppercase tracking-wider flex items-center gap-2">
-                  <div class="w-1 h-1 rounded-full bg-primary"></div> 主力净流入 (万元)
-                </label>
-                <div class="flex items-center gap-3">
-                  <input v-model="searchFilters.main_inflow.min" type="number" placeholder="最小" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                  <div class="w-3 h-px bg-foreground/20"></div>
-                  <input v-model="searchFilters.main_inflow.max" type="number" placeholder="最大" class="w-full px-4 py-2.5 bg-foreground/[0.03] border border-thin rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" />
-                </div>
-              </div>
-            </div>
-          </div>
 
-          <!-- 搜索结果区 -->
-          <div v-if="showSearchResults" class="flex-1 flex flex-col min-h-0 animate-in fade-in slide-in-from-top-4 duration-500">
-            <div class="flex-none mb-4 flex items-center justify-between">
-              <span class="text-sm font-bold text-foreground/40 uppercase tracking-widest">搜索结果 ({{ customSearchResults.length }} 只)</span>
-            </div>
-            <div class="flex-1 bg-card border border-thin rounded-3xl overflow-hidden shadow-sm flex flex-col">
-              <div class="flex-1 overflow-auto custom-scrollbar">
-                <table class="w-full border-collapse text-left text-sm">
-                  <thead class="sticky top-0 z-10 bg-card/80 backdrop-blur-md border-b border-thin">
-                    <tr>
-                      <th class="px-6 py-4 font-bold text-foreground/40 uppercase tracking-wider">股票名称</th>
-                      <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">现价</th>
-                      <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">涨跌幅</th>
-                      <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">PE(TTM)</th>
-                      <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">PB</th>
-                      <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">总市值</th>
-                      <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">主力净流</th>
-                      <th class="px-6 py-4 font-bold text-foreground/40 uppercase tracking-wider text-center">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-thin">
-                    <tr v-for="stock in customSearchResults" :key="stock.code" class="group hover:bg-foreground/[0.02] transition-colors">
-                      <td class="px-6 py-4">
-                        <div class="flex flex-col">
-                          <span class="font-bold">{{ stock.name }}</span>
-                          <span class="text-[10px] font-mono text-foreground/30 group-hover:text-primary/50 transition-colors">{{ stock.code }}</span>
-                        </div>
-                      </td>
-                      <td class="px-4 py-4 text-right font-mono">{{ formatNumber(stock.price) }}</td>
-                      <td class="px-4 py-4 text-right font-mono">
-                        <span :class="stock.change > 0 ? 'text-red-500' : stock.change < 0 ? 'text-green-500' : ''">
-                          {{ stock.change > 0 ? '+' : '' }}{{ formatNumber(stock.change) }}%
-                        </span>
-                      </td>
-                      <td class="px-4 py-4 text-right font-mono text-foreground/60">{{ formatNumber(stock.pe_ttm) }}</td>
-                      <td class="px-4 py-4 text-right font-mono text-foreground/60">{{ formatNumber(stock.pb) }}</td>
-                      <td class="px-4 py-4 text-right font-mono text-foreground/60">{{ formatAmount(stock.market_cap) }}</td>
-                      <td class="px-4 py-4 text-right font-mono">
-                        <span :class="stock.main_inflow > 0 ? 'text-red-500' : 'text-green-500'">{{ formatAmount(stock.main_inflow) }}</span>
-                      </td>
-                      <td class="px-6 py-4 text-center">
-                        <div class="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20"><TrendingUp class="w-4 h-4" /></button>
-                          <button class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20"><ExternalLink class="w-4 h-4" /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div v-if="customSearchResults.length === 0" class="flex flex-col items-center justify-center py-20 text-foreground/20">
-                  <Search class="w-16 h-16 mb-4 opacity-10" />
-                  <p class="text-lg">未找到符合条件的股票</p>
-                  <p class="text-xs mt-2">请调整筛选范围后重试</p>
+              <div class="space-y-5">
+                <div v-for="item in groupData.items" :key="item.key" class="space-y-2 relative group/item">
+                  <label class="text-[11px] font-bold text-foreground/50 uppercase tracking-wider flex items-center gap-2">
+                    <div class="w-1 h-1 rounded-full" :class="'bg-' + groupMetadata[groupData.group].color.split('-')[1] + '-500'"></div> 
+                    {{ item.label }} 
+                    <span v-if="item.unit" class="opacity-40 font-normal">({{ item.unit }})</span>
+                  </label>
+                  <div class="flex items-center gap-2">
+                    <input 
+                      v-model="searchFilters[item.key as keyof typeof searchFilters].min" 
+                      type="number" 
+                      placeholder="最小" 
+                      class="w-full px-3 py-2 bg-background/50 border border-thin rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" 
+                    />
+                    <div class="w-2 h-px bg-foreground/10"></div>
+                    <input 
+                      v-model="searchFilters[item.key as keyof typeof searchFilters].max" 
+                      type="number" 
+                      placeholder="最大" 
+                      class="w-full px-3 py-2 bg-background/50 border border-thin rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all text-sm" 
+                    />
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-          
-          <!-- 初始引导状态 -->
-          <div v-else class="flex-1 flex flex-col items-center justify-center text-foreground/20 space-y-4">
-            <div class="w-20 h-20 bg-foreground/[0.03] border border-dashed border-thin rounded-3xl flex items-center justify-center">
-              <Search class="w-10 h-10 opacity-20" />
+        </div>
+
+        <!-- 分割线 -->
+        <div v-if="showSearchResults" class="h-px bg-foreground/5 -mx-8"></div>
+
+        <!-- 搜索结果区 -->
+        <div v-if="showSearchResults" class="flex flex-col animate-in fade-in slide-in-from-top-4 duration-500">
+          <div ref="resultsHeaderRef" class="mb-6 flex items-center justify-between scroll-mt-8">
+            <span class="text-sm font-bold text-foreground/40 uppercase tracking-widest">搜索结果 ({{ customSearchResults.length }} 只)</span>
+          </div>
+          <div class="bg-card border border-thin rounded-3xl overflow-hidden shadow-sm">
+            <div class="overflow-x-auto">
+              <table class="w-full border-collapse text-left text-sm">
+                <thead class="bg-card/80 backdrop-blur-md border-b border-thin">
+                  <tr>
+                    <th class="px-6 py-4 font-bold text-foreground/40 uppercase tracking-wider">股票名称</th>
+                    <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">最新价</th>
+                    <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">涨跌幅</th>
+                    <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">PE(TTM)</th>
+                    <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">PB</th>
+                    <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">总市值</th>
+                    <th class="px-4 py-4 font-bold text-foreground/40 uppercase tracking-wider text-right">主力净流</th>
+                    <th class="px-6 py-4 font-bold text-foreground/40 uppercase tracking-wider text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-thin">
+                  <tr v-for="stock in customSearchResults" :key="stock.code" class="group hover:bg-foreground/[0.02] transition-colors">
+                    <td class="px-6 py-4">
+                      <div class="flex flex-col">
+                        <span class="font-bold">{{ stock.name }}</span>
+                        <span class="text-[10px] font-mono text-foreground/30 group-hover:text-primary/50 transition-colors">{{ stock.code }}</span>
+                      </div>
+                    </td>
+                    <td class="px-4 py-4 text-right font-mono">{{ formatNumber(stock.price) }}</td>
+                    <td class="px-4 py-4 text-right font-mono">
+                      <span :class="stock.change > 0 ? 'text-red-500' : stock.change < 0 ? 'text-green-500' : ''">
+                        {{ stock.change > 0 ? '+' : '' }}{{ formatNumber(stock.change) }}%
+                      </span>
+                    </td>
+                    <td class="px-4 py-4 text-right font-mono text-foreground/60">{{ formatNumber(stock.pe_ttm) }}</td>
+                    <td class="px-4 py-4 text-right font-mono text-foreground/60">{{ formatNumber(stock.pb) }}</td>
+                    <td class="px-4 py-4 text-right font-mono text-foreground/60">{{ formatAmount(stock.market_cap) }}</td>
+                    <td class="px-4 py-4 text-right font-mono">
+                      <span :class="stock.main_inflow > 0 ? 'text-red-500' : 'text-green-500'">{{ formatAmount(stock.main_inflow) }}</span>
+                    </td>
+                    <td class="px-6 py-4 text-center">
+                      <div class="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20"><TrendingUp class="w-4 h-4" /></button>
+                        <button class="p-2 hover:bg-primary/10 hover:text-primary rounded-lg transition-all text-foreground/20"><ExternalLink class="w-4 h-4" /></button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            <div class="text-center">
-              <p class="text-lg font-medium">配置筛选条件并点击“执行筛选”</p>
-              <p class="text-sm opacity-50">系统将从 {{ marketStore.stocks.length }} 只 A 股中为您快速匹配</p>
+            <div v-if="customSearchResults.length === 0" class="flex flex-col items-center justify-center py-20 text-foreground/20">
+              <Search class="w-16 h-16 mb-4 opacity-10" />
+              <p class="text-lg">未找到符合条件的股票</p>
+              <p class="text-xs mt-2">请调整筛选范围后重试</p>
             </div>
+          </div>
+        </div>
+        
+        <!-- 初始引导状态 -->
+        <div v-else class="flex flex-col items-center justify-center text-foreground/20 space-y-4 py-20">
+          <div class="w-20 h-20 bg-foreground/[0.03] border border-dashed border-thin rounded-3xl flex items-center justify-center">
+            <Search class="w-10 h-10 opacity-20" />
+          </div>
+          <div class="text-center">
+            <p class="text-lg font-medium">配置筛选条件并点击“执行筛选”</p>
+            <p class="text-sm opacity-50">系统将从 {{ marketStore.stocks.length }} 只 A 股中为您快速匹配</p>
           </div>
         </div>
       </div>
@@ -734,7 +872,7 @@ const formatNumber = (val: number | undefined | null, decimals: number = 2) => {
                 <div class="flex flex-wrap gap-2">
                   <div v-for="(val, key) in item.filters" :key="key">
                     <div v-if="val.min !== '' || val.max !== ''" class="px-2 py-1 bg-foreground/[0.03] border border-thin rounded-lg text-[10px] text-foreground/60 flex items-center gap-1.5">
-                      <span class="font-bold opacity-40">{{ filterLabels[key] || key }}</span>
+                      <span class="font-bold opacity-40">{{ getFilterLabel(key) }}</span>
                       <span>{{ val.min || '∞' }} - {{ val.max || '∞' }}</span>
                     </div>
                   </div>
@@ -761,4 +899,24 @@ const formatNumber = (val: number | undefined | null, decimals: number = 2) => {
       </div>
     </template>
   </SidebarLayout>
+
+  <!-- 回到顶部悬浮按钮 -->
+  <Transition
+    enter-active-class="transition duration-300 ease-out"
+    enter-from-class="translate-y-10 opacity-0"
+    enter-to-class="translate-y-0 opacity-100"
+    leave-active-class="transition duration-200 ease-in"
+    leave-from-class="translate-y-0 opacity-100"
+    leave-to-class="translate-y-10 opacity-0"
+  >
+    <button 
+      v-show="showBackTop"
+      @click="scrollToTop"
+      class="fixed bottom-8 right-8 w-12 h-12 bg-primary text-primary-foreground rounded-2xl shadow-xl shadow-primary/20 flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-[100]"
+      title="回到顶部"
+    >
+      <ArrowUp class="w-6 h-6" />
+    </button>
+  </Transition>
+  </div>
 </template>

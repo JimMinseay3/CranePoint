@@ -20,7 +20,8 @@ pub fn run() {
             open_folder,
             run_stock_analysis,
             list_analysis_archives,
-            download_market_history
+            download_market_history,
+            run_strategy_screening
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -47,7 +48,7 @@ async fn fetch_stock_page(page: i32, page_size: i32) -> Result<Vec<Value>, Strin
         ("invt", "2".to_string()),
         ("fid", "f3".to_string()),
         ("fs", "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048".to_string()), // 沪深 A 股
-        ("fields", "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f22,f23,f37,f57,f58,f114,f115,f161,f162".to_string()),
+        ("fields", "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f22,f23,f37,f57,f58,f62,f114,f115,f128,f161,f162,f184".to_string()),
     ];
 
     let response = client.get(url)
@@ -127,10 +128,13 @@ async fn fetch_stock_page(page: i32, page_size: i32) -> Result<Vec<Value>, Strin
                 "limit_down": limit_down,
                 "total_shares": item.get("f57").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 "circulating_shares": item.get("f58").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "main_inflow": item.get("f62").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 "pe_ttm": item.get("f114").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 "pe_static": item.get("f115").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "change_ytd": item.get("f128").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 "outer_disc": item.get("f161").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 "inner_disc": item.get("f162").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "main_inflow_ratio": item.get("f184").and_then(|v| v.as_f64()).unwrap_or(0.0),
             }));
         }
     }
@@ -425,6 +429,99 @@ async fn download_market_history(
         Ok(final_result)
     } else {
         Err(format!("导出脚本执行失败 (退出码: {:?})", status.code()))
+    }
+}
+
+#[tauri::command]
+async fn run_strategy_screening(
+    app: AppHandle,
+    stocks: Vec<Value>,
+) -> Result<String, String> {
+    let python_path = if cfg!(windows) {
+        "../.venv/Scripts/python.exe"
+    } else {
+        "../.venv/bin/python"
+    };
+
+    // 1. 将实时快照存入临时文件，供 Python 读取
+    // 使用随机 ID 防止并发任务冲突
+    let task_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("cranepoint_stocks_{}.json", task_id));
+    let snapshot_path = temp_file.to_string_lossy().to_string();
+    
+    std::fs::write(&temp_file, serde_json::to_string(&stocks).unwrap())
+        .map_err(|e| format!("无法创建快照文件: {}", e))?;
+
+    println!("DEBUG: 正在启动 MACD 策略筛选引擎...");
+
+    let mut child = Command::new(python_path)
+        .arg("../lib/strategy_screening.py")
+        .arg("--stocks_path")
+        .arg(&snapshot_path)
+        .env("PYTHONIOENCODING", "utf-8")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动筛选引擎: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("无法打开 stdout")?;
+    let stderr = child.stderr.take().ok_or("无法打开 stderr")?;
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let app_handle = app.clone();
+    let (tx, mut rx) = tauri::async_runtime::channel::<Result<String, String>>(1);
+
+    // 处理 stdout
+    let stdout_task = tauri::async_runtime::spawn(async move {
+        while let Ok(Some(_line)) = stdout_reader.next_line().await {
+            // 暂时忽略
+        }
+    });
+
+    // 处理 stderr
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        let mut last_success = String::new();
+        let mut last_error = String::new();
+        while let Ok(Some(line)) = stderr_reader.next_line().await {
+            if line.starts_with("PROGRESS:") {
+                let p = line.trim_start_matches("PROGRESS:").trim().parse::<i32>().unwrap_or(0);
+                let _ = app_handle.emit("screening-progress", p);
+            } else if line.starts_with("SUCCESS:") {
+                last_success = line.trim_start_matches("SUCCESS:").trim().to_string();
+            } else if line.starts_with("ERROR:") {
+                last_error = line.trim_start_matches("ERROR:").trim().to_string();
+                eprintln!("Python Error: {}", line);
+            }
+        }
+        if !last_success.is_empty() {
+            let _ = tx.send(Ok(last_success)).await;
+        } else {
+            let _ = tx.send(Err(last_error)).await;
+        }
+    });
+
+    let final_result = rx.recv().await.unwrap_or(Err("Python 进程意外终止".to_string()));
+    let _ = stderr_task.await;
+    let _ = stdout_task.await;
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    
+    // 清理临时文件
+    let _ = std::fs::remove_file(temp_file);
+
+    match final_result {
+        Ok(res) => Ok(res),
+        Err(err) => {
+            if err.is_empty() {
+                Err(format!("筛选脚本执行失败 (退出码: {:?})", status.code()))
+            } else {
+                Err(format!("筛选脚本报错: {}", err))
+            }
+        }
     }
 }
 

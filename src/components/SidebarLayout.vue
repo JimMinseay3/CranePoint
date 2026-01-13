@@ -22,17 +22,22 @@ const isCollapsed = ref(false)
 <template>
   <div class="h-full flex flex-col p-6 overflow-hidden bg-background">
     <!-- 顶部标题栏 -->
-    <div class="flex-none mb-6 flex items-start justify-between">
-      <div>
+    <div class="flex-none mb-6 flex items-start">
+      <div :class="[
+        'flex-none transition-all duration-300 ease-in-out overflow-hidden',
+        isCollapsed ? 'w-16' : 'w-64'
+      ]">
         <div class="flex items-center gap-3 mb-1">
-          <component :is="icon" v-if="icon" class="w-8 h-8 text-primary" />
-          <h1 class="text-3xl font-semibold tracking-tight text-foreground">{{ title }}</h1>
+          <component :is="icon" v-if="icon" class="w-8 h-8 text-primary flex-none" />
+          <h1 class="text-3xl font-semibold tracking-tight text-foreground truncate">{{ title }}</h1>
         </div>
-        <p v-if="subtitle" class="text-sm text-foreground/50 ml-11">{{ subtitle }}</p>
+        <p v-if="subtitle" class="text-sm text-foreground/50 ml-11 truncate transition-opacity duration-300" :class="isCollapsed ? 'opacity-0' : 'opacity-100'">
+          {{ subtitle }}
+        </p>
       </div>
       
-      <!-- 标题栏右侧额外插槽 -->
-      <div v-if="$slots['header-extra']" class="flex items-center">
+      <!-- 标题栏右侧额外插槽 - 与主内容区对齐 -->
+      <div v-if="$slots['header-extra']" class="flex-1 flex items-center ml-6">
         <slot name="header-extra"></slot>
       </div>
     </div>
